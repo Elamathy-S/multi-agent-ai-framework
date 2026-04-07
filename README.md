@@ -19,7 +19,7 @@ Prompt engineering to improve AI reasoning and task execution
 Programming Languages: Python
 Frameworks: FastAPI, Python standard libraries
 AI Tools: LLMs, RAG pipelines, multi-agent orchestration
-Database / Storage: TBD (structured/unstructured data support)
+Database / Storage: PostgreSQL
 Development Tools: Git, Postman, VS Code
 
 **Current Status**
