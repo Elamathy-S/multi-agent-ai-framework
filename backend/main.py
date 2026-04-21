@@ -2,20 +2,22 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from datetime import datetime
 
-# Agents (optional direct access endpoints)
-from agents.customer_agent import customer_agent
-from agents.loan_agent import loan_agent
-from agents.trading_agent import trading_agent
-from agents.risk_agent import risk_agent
-
-# Orchestrator (your separate file)
-from agents import orchestrator
+# Orchestrator
+from backend.agents import orchestrator
 
 # Tools (for health check)
-from mcp.customer_tools import get_customer_profile
+from backend.tools.customer_tools import get_customer_profile
+from backend.tools.credit_score_tool import credit_score_tool
+from backend.tools.tool_registry import init_tools
+
+from backend.agents.customer_agent import customer_agent
 
 
 app = FastAPI(title="MCP Financial Multi-Agent System")
+
+@app.on_event("startup")
+def startup_event():
+    init_tools()
 
 
 # -----------------------------
@@ -101,6 +103,16 @@ def risk(req: QueryRequest):
     }
 
 
+@app.post("/credit-score")
+def get_credit_score(req: QueryRequest):
+    result = credit_score_tool(req.customer_id)
+
+    return {
+        "timestamp": str(datetime.now()),
+        "customer_id": req.customer_id,
+        "credit_score": result
+    }
+
 # -----------------------------
 # DEBUG ENDPOINT (VERY USEFUL)
 # -----------------------------
@@ -111,3 +123,91 @@ def debug_tools():
         "total_tools": len(TOOLS),
         "tools": list(TOOLS.keys())
     }
+    
+from fastapi import APIRouter
+from backend.tools.tool_registry import registry
+from backend.agents.orchestrator import orchestrator
+
+router = APIRouter(prefix="/mcp")
+
+
+# -----------------------
+# LIST TOOLS
+# -----------------------
+@router.get("/tools")
+def list_tools():
+    return {
+        "tools": [
+            {
+                "name": name,
+                "agent": t["agent"],
+                "description": t.get("description", "")
+            }
+            for name, t in registry.tools.items()
+        ]
+    }
+
+
+# -----------------------
+# EXECUTE TOOL DIRECTLY
+# -----------------------
+@router.post("/tools/execute")
+def execute_tool(payload: dict):
+
+    tool = registry.get(payload["tool"])
+
+    if not tool:
+        return {"error": "Tool not found"}
+
+    result = tool["function"](**payload.get("args", {}))
+
+    return {
+        "tool": payload["tool"],
+        "result": result
+    }
+
+
+# -----------------------
+# RUN AGENT
+# -----------------------
+@router.post("/agents/run")
+def run_agent(payload: dict):
+
+    result = orchestrator(
+        payload["query"],
+        payload.get("customer_id", 1)
+    )
+
+    return {
+        "agent": payload["agent"],
+        "result": result
+    }
+
+
+from backend.llm.ollama_llm import ollama_tool_call
+from backend.mcp.executor import execute_tool
+from backend.mcp.schemas import TOOLS
+
+
+@app.post("/mcp/chat")
+def mcp_chat(req: QueryRequest):
+
+    # 🔥 REAL LLM DECISION
+    decision = ollama_tool_call(req.query, TOOLS)
+
+    if not decision.get("tool"):
+        return {"response": "No tool selected"}
+
+    result = execute_tool(
+        decision["tool"],
+        decision.get("arguments", {})
+    )
+
+    return {
+        "tool_used": decision["tool"],
+        "tool_result": result
+    }
+
+from backend.mcp.gateway import router as mcp_router
+
+app.include_router(mcp_router)
