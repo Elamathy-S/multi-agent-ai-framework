@@ -1,19 +1,26 @@
+"""
+seed_data.py — populates finance_sim.db (SQLite) with realistic fake data.
+Run once from the project root:  python data/seed_data.py
+"""
+
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import random
 from faker import Faker
 from datetime import datetime, timedelta
-import psycopg2
+
+from server.db import engine, SessionLocal, Base
+from server.models.customer import Customer
+from server.models.accounts import Account
+from server.models.transactions import Transaction
+from server.models.loans import Loan
+from server.models.market import MarketPrice
+from server.models.trade import Trade
+from server.models.portfolio import Portfolio
 
 fake = Faker()
-
-# --- DB Connection ---
-conn = psycopg2.connect(
-    dbname="finance_sim",   
-    user="elamathy",          
-    password="elamathy",  
-    host="localhost",
-    port="5432"
-)
-cur = conn.cursor()
 
 # --- Config ---
 NUM_CUSTOMERS = 50
@@ -21,103 +28,133 @@ NUM_ACCOUNTS_PER_CUSTOMER = 2
 NUM_TRADES_PER_CUSTOMER = 20
 STOCK_SYMBOLS = ["AAPL", "TSLA", "MSFT", "GOOG", "AMZN"]
 
-# --- 1. Customers ---
-customers = []
-for _ in range(NUM_CUSTOMERS):
-    name = fake.name()
-    email = fake.email()
-    phone = fake.phone_number()
-    cur.execute(
-        "INSERT INTO customers (name, email, phone) VALUES (%s, %s, %s) RETURNING id",
-        (name, email, phone)
-    )
-    customer_id = cur.fetchone()[0]
-    customers.append(customer_id)
 
-# --- 2. Accounts ---
-accounts = []
-for customer_id in customers:
-    for _ in range(NUM_ACCOUNTS_PER_CUSTOMER):
-        balance = round(random.uniform(1000, 100000), 2)
-        account_type = random.choice(["checking", "savings"])
-        status = "active"
-        cur.execute(
-            "INSERT INTO accounts (customer_id, balance, account_type, status) VALUES (%s, %s, %s, %s) RETURNING id",
-            (customer_id, balance, account_type, status)
+def seed():
+    # Create all tables (safe to run multiple times)
+    Base.metadata.create_all(bind=engine)
+
+    db = SessionLocal()
+
+    # Guard: don't re-seed if data already exists
+    if db.query(Customer).count() > 0:
+        print("⚠️  Database already seeded. Delete finance_sim.db to re-seed.")
+        db.close()
+        return
+
+    print("🌱 Seeding database...")
+
+    # --- 1. Customers ---
+    customer_ids = []
+    for _ in range(NUM_CUSTOMERS):
+        c = Customer(
+            name=fake.name(),
+            email=fake.email(),
+            created_at=fake.date_this_decade()
         )
-        accounts.append(cur.fetchone()[0])
+        db.add(c)
+        db.flush()  # get auto-generated id
+        customer_ids.append(c.id)
 
-# --- 3. Transactions ---
-for account_id in accounts:
-    for _ in range(10):
-        amount = round(random.uniform(50, 5000), 2)
-        t_type = random.choice(["deposit", "withdrawal", "transfer"])
-        description = fake.sentence()
-        timestamp = fake.date_time_between(start_date="-1y", end_date="now")
-        cur.execute(
-            "INSERT INTO transactions (account_id, amount, type, description, timestamp) VALUES (%s, %s, %s, %s, %s)",
-            (account_id, amount, t_type, description, timestamp)
-        )
-
-# --- 4. Loans ---
-for customer_id in customers:
-    if random.random() < 0.4:  # 40% of customers have loans
-        amount = round(random.uniform(5000, 50000), 2)
-        interest_rate = round(random.uniform(3, 12), 2)
-        term_months = random.choice([12, 24, 36, 60])
-        status = random.choice(["approved", "pending", "rejected"])
-        cur.execute(
-            "INSERT INTO loans (customer_id, amount, interest_rate, term_months, status) VALUES (%s, %s, %s, %s, %s)",
-            (customer_id, amount, interest_rate, term_months, status)
-        )
-
-# --- 5. Market Prices ---
-today = datetime.now()
-for symbol in STOCK_SYMBOLS:
-    for day in range(365):  # 1 year of daily prices
-        date = today - timedelta(days=day)
-        base = random.uniform(100, 1000)
-        open_price = round(base, 2)
-        close_price = round(base + random.uniform(-10, 10), 2)
-        high_price = round(max(open_price, close_price) + random.uniform(0, 5), 2)
-        low_price = round(min(open_price, close_price) - random.uniform(0, 5), 2)
-        volume = random.randint(10000, 1000000)
-        cur.execute(
-            "INSERT INTO market_prices (symbol, price, timestamp) VALUES (%s, %s, %s)",
-            (symbol, close_price, date)
-        )
-
-# --- 6. Trades & Portfolio ---
-for customer_id in customers:
-    portfolio = {}
-    for _ in range(NUM_TRADES_PER_CUSTOMER):
-        symbol = random.choice(STOCK_SYMBOLS)
-        trade_type = random.choice(["BUY", "SELL"])
-        quantity = random.randint(1, 100)
-        price = round(random.uniform(50, 1000), 2)
-        timestamp = fake.date_time_between(start_date="-1y", end_date="now")
-        cur.execute(
-            "INSERT INTO trades (customer_id, symbol, trade_type, quantity, price, timestamp) VALUES (%s, %s, %s, %s, %s, %s)",
-            (customer_id, symbol, trade_type, quantity, price, timestamp)
-        )
-        # Update portfolio
-        if trade_type == "BUY":
-            portfolio[symbol] = portfolio.get(symbol, 0) + quantity
-        else:
-            portfolio[symbol] = max(0, portfolio.get(symbol, 0) - quantity)
-
-    # Save portfolio
-    for symbol, qty in portfolio.items():
-        if qty > 0:
-            avg_price = round(random.uniform(50, 1000), 2)
-            cur.execute(
-                "INSERT INTO portfolio (customer_id, symbol, quantity, avg_purchase_price) VALUES (%s, %s, %s, %s)",
-                (customer_id, symbol, qty, avg_price)
+    # --- 2. Accounts ---
+    account_ids = []
+    for cid in customer_ids:
+        for _ in range(NUM_ACCOUNTS_PER_CUSTOMER):
+            a = Account(
+                customer_id=cid,
+                balance=round(random.uniform(1000, 100000), 2),
+                account_type=random.choice(["checking", "savings"]),
+                status="active"
             )
+            db.add(a)
+            db.flush()
+            account_ids.append(a.id)
 
-# Commit changes
-conn.commit()
-cur.close()
-conn.close()
+    # --- 3. Transactions ---
+    TRANSACTION_DESCRIPTIONS = {
+        "deposit": [
+            "Salary deposit", "Freelance payment received", "Bank transfer in",
+            "Direct deposit payroll", "Investment dividend received",
+            "Tax refund deposit", "Insurance reimbursement", "Rental income",
+        ],
+        "withdrawal": [
+            "ATM cash withdrawal", "Grocery store purchase", "Online shopping",
+            "Utility bill payment", "Restaurant dining", "Fuel station",
+            "Pharmacy purchase", "Subscription service charge",
+            "Medical bill payment", "Rent payment",
+        ],
+        "transfer": [
+            "Transfer to savings account", "Transfer to checking account",
+            "Wire transfer sent", "Inter-bank transfer",
+            "Loan repayment transfer", "Bill pay transfer",
+        ],
+    }
+    for aid in account_ids:
+        for _ in range(10):
+            txn_type = random.choice(["deposit", "withdrawal", "transfer"])
+            db.add(Transaction(
+                account_id=aid,
+                amount=round(random.uniform(50, 5000), 2),
+                type=txn_type,
+                description=random.choice(TRANSACTION_DESCRIPTIONS[txn_type]),
+                timestamp=fake.date_time_between(start_date="-1y", end_date="now")
+            ))
 
-print("✅ Database seeded successfully!")
+    # --- 4. Loans ---
+    for cid in customer_ids:
+        if random.random() < 0.4:
+            db.add(Loan(
+                customer_id=cid,
+                amount=round(random.uniform(5000, 50000), 2),
+                interest_rate=round(random.uniform(3, 12), 2),
+                status=random.choice(["approved", "pending", "rejected"])
+            ))
+
+    # --- 5. Market Prices (90 days to keep DB small) ---
+    today = datetime.now()
+    for symbol in STOCK_SYMBOLS:
+        base_price = random.uniform(100, 1000)
+        for day in range(90):
+            base_price += random.uniform(-15, 15)
+            base_price = max(10, base_price)
+            db.add(MarketPrice(
+                symbol=symbol,
+                price=round(base_price, 2),
+                timestamp=today - timedelta(days=day)
+            ))
+
+    # --- 6. Trades & Portfolio ---
+    for cid in customer_ids:
+        holdings: dict[str, int] = {}
+        for _ in range(NUM_TRADES_PER_CUSTOMER):
+            symbol = random.choice(STOCK_SYMBOLS)
+            trade_type = random.choice(["BUY", "SELL"])
+            quantity = random.randint(1, 100)
+            price = round(random.uniform(50, 1000), 2)
+            db.add(Trade(
+                customer_id=cid,
+                symbol=symbol,
+                quantity=quantity,
+                price=price,
+                trade_time=fake.date_time_between(start_date="-1y", end_date="now")
+            ))
+            if trade_type == "BUY":
+                holdings[symbol] = holdings.get(symbol, 0) + quantity
+            else:
+                holdings[symbol] = max(0, holdings.get(symbol, 0) - quantity)
+
+        for symbol, qty in holdings.items():
+            if qty > 0:
+                db.add(Portfolio(
+                    customer_id=cid,
+                    symbol=symbol,
+                    quantity=qty,
+                    avg_purchase_price=round(random.uniform(50, 1000), 2)
+                ))
+
+    db.commit()
+    db.close()
+    print(f"✅ Seeded {NUM_CUSTOMERS} customers, accounts, loans, trades, market prices.")
+
+
+if __name__ == "__main__":
+    seed()

@@ -1,0 +1,38 @@
+# MCP Protocol Core
+mcp>=1.1.0
+
+# Web Framework
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.0.0
+
+# Database
+# Development: SQLite (no setup needed — used by default via finance_sim.db)
+# Production:  set DATABASE_URL=postgresql://... in .env and uncomment below
+# psycopg2-binary>=2.9.9
+sqlalchemy>=2.0.0
+
+# LLM Integration (local via Ollama — run: ollama serve && ollama pull phi3)
+ollama>=0.1.0
+
+# HTTP / Async
+httpx>=0.25.0
+anyio>=4.0.0
+
+# Environment & Config
+python-dotenv>=1.0.0
+
+# Data Generation
+faker>=20.0.0
+
+# Logging
+python-json-logger>=2.0.0
+
+# RAG (optional — TF-IDF fallback used if Ollama embeddings unavailable)
+# For semantic embeddings: ollama pull nomic-embed-text
+numpy>=1.26.0
+chromadb>=0.4.0
+
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0

@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Finance AI Assistant</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div class="app">
+
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="logo">
+        <div class="logo-mark">💼</div>
+        <div>
+          <div>Finance AI</div>
+          <div class="logo-sub">MCP + Ollama</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">Customer</div>
+      <div class="cid-wrap">
+        <span class="cid-label">Customer ID</span>
+        <input class="cid-input" id="cid" type="number" value="1" min="1" max="100" />
+      </div>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">Quick queries</div>
+      <button class="quick-btn" onclick="ask('What is this customer profile?')"><span class="icon">👤</span>Customer profile</button>
+      <button class="quick-btn" onclick="ask('What is the credit score?')"><span class="icon">📊</span>Credit score</button>
+      <button class="quick-btn" onclick="ask('Show all loans')"><span class="icon">🏦</span>Loan status</button>
+      <button class="quick-btn" onclick="ask('Run a risk assessment')"><span class="icon">⚠️</span>Risk assessment</button>
+      <button class="quick-btn" onclick="ask('Check for fraud')"><span class="icon">🔍</span>Fraud check</button>
+      <button class="quick-btn" onclick="ask('Show portfolio holdings')"><span class="icon">📈</span>Portfolio</button>
+      <button class="quick-btn" onclick="ask('Calculate profit and loss')"><span class="icon">💰</span>PnL analysis</button>
+      <button class="quick-btn" onclick="ask('Give me a full financial analysis')"><span class="icon">📋</span>Full analysis</button>
+    </div>
+
+    <div class="sidebar-status">
+      <div class="status-row">
+        <span class="status-label">API server</span>
+        <div class="status-pill"><div class="dot" id="dot-api"></div><span id="lbl-api">—</span></div>
+      </div>
+      <div class="status-row">
+        <span class="status-label">MCP server</span>
+        <div class="status-pill"><div class="dot" id="dot-mcp"></div><span id="lbl-mcp">—</span></div>
+      </div>
+      <div class="status-row">
+        <span class="status-label">Ollama</span>
+        <div class="status-pill"><div class="dot" id="dot-llm"></div><span id="lbl-llm">—</span></div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Chat -->
+  <div class="chat">
+    <div class="chat-header">
+      <div class="header-avatar">🤖</div>
+      <div>
+        <div class="chat-header-title">Finance Assistant</div>
+        <div class="chat-header-sub">Multi-agent · MCP protocol · Ollama</div>
+      </div>
+    </div>
+
+    <div class="messages" id="messages">
+      <div class="welcome" id="welcome">
+        <div class="welcome-icon">💬</div>
+        <div class="welcome-title">How can I help you?</div>
+        <div class="welcome-sub">Ask me anything about a customer — credit scores, loans, risk, fraud, portfolios, and more. Powered by specialist AI agents.</div>
+        <div class="welcome-chips">
+          <div class="chip" onclick="ask('What is this customer profile?')">Customer profile</div>
+          <div class="chip" onclick="ask('What is the credit score?')">Credit score</div>
+          <div class="chip" onclick="ask('Any fraud risks?')">Fraud check</div>
+          <div class="chip" onclick="ask('Give me a full financial analysis')">Full analysis</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="input-bar">
+      <div class="input-wrap">
+        <textarea class="input-field" id="input" rows="1" placeholder="Ask about a customer..." maxlength="500"></textarea>
+        <button class="send-btn" id="send-btn" onclick="send()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
+          </svg>
+        </button>
+      </div>
+      <div class="input-hint">Enter to send · Shift+Enter for new line</div>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
