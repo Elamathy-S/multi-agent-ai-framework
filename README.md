@@ -91,9 +91,7 @@ The framework serves two purposes:
 | Database | SQLite (dev) / PostgreSQL (prod) |
 | ORM | SQLAlchemy 2.0 |
 | Agent Protocol | MCP (Model Context Protocol) |
-| Data Validation | Pydantic v2 |
 | Frontend | HTML / CSS / JavaScript |
-| Testing | pytest + pytest-asyncio |
 | Data Generation | Faker |
 
 ---
