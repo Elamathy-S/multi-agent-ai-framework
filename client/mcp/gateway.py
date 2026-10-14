@@ -1,16 +1,14 @@
 """
-client/mcp/gateway.py — FastAPI router that queries the real MCP server.
+client/mcp/gateway.py — FastAPI router for MCP server introspection + execution.
 
 Mounted at /mcp/* by main.py.
-GET /mcp/tools now queries the MCP server via the MCP client so it returns
-all 10 tools, 4 prompts, and 4 resources — not just the local registry.
+All tool execution now goes through the MCP server via the MCP client.
 """
 
-import asyncio
 import os
 import json
 from fastapi import APIRouter
-from client.mcp.executor import run_tool_by_name
+from client.mcp.client import MCPClient, MCPConnectionError
 from client.agents.orchestrator import orchestrator
 
 router = APIRouter(prefix="/mcp", tags=["MCP"])
@@ -80,7 +78,7 @@ async def _query_mcp_server(action: str, **kwargs) -> dict:
 # ---------------------------------------------------------------------------
 @router.get("/tools")
 async def list_tools():
-    """List all 10 tools registered on the MCP server."""
+    """List all tools registered on the MCP server."""
     return await _query_mcp_server("list_tools")
 
 
@@ -89,7 +87,7 @@ async def list_tools():
 # ---------------------------------------------------------------------------
 @router.get("/prompts")
 async def list_prompts():
-    """List all 4 prompts registered on the MCP server."""
+    """List all prompts registered on the MCP server."""
     return await _query_mcp_server("list_prompts")
 
 
@@ -98,7 +96,7 @@ async def list_prompts():
 # ---------------------------------------------------------------------------
 @router.get("/resources")
 async def list_resources():
-    """List all 4 resources registered on the MCP server."""
+    """List all resources registered on the MCP server."""
     return await _query_mcp_server("list_resources")
 
 
@@ -125,12 +123,12 @@ async def mcp_surface():
 
 
 # ---------------------------------------------------------------------------
-# 5. EXECUTE TOOL — direct call via registry (no MCP round-trip needed)
+# 5. EXECUTE TOOL — now goes through MCP (not the local registry)
 # ---------------------------------------------------------------------------
 @router.post("/tools/execute")
-def execute_tool_endpoint(payload: dict):
+async def execute_tool_endpoint(payload: dict):
     """
-    Execute a tool by name directly.
+    Execute a tool by name via the MCP server.
     Body: { "tool": "get_customer", "arguments": { "customer_id": 3 } }
     """
     tool_name = payload.get("tool")
@@ -139,19 +137,27 @@ def execute_tool_endpoint(payload: dict):
     if not tool_name:
         return {"error": "Missing 'tool' field in request body"}
 
-    return {"tool": tool_name, "output": run_tool_by_name(tool_name, args)}
+    try:
+        async with MCPClient(MCP_SERVER_SSE_URL) as mcp:
+            result = await mcp.call(tool_name, **args)
+        return {"tool": tool_name, "output": result}
+    except MCPConnectionError as e:
+        return {"error": str(e)}
+    except Exception as e:
+        return {"error": f"Tool execution failed: {e}"}
 
 
 # ---------------------------------------------------------------------------
-# 6. RUN AGENT
+# 6. RUN AGENT — now uses the async orchestrator (MCP-powered)
 # ---------------------------------------------------------------------------
 @router.post("/agents/run")
-def run_agent(payload: dict):
-    """Route a natural language query through the orchestrator."""
+async def run_agent(payload: dict):
+    """Route a natural language query through the MCP-powered orchestrator."""
     query       = payload.get("query", "")
     customer_id = payload.get("customer_id", 1)
 
     if not query:
         return {"error": "Missing 'query' field"}
 
-    return {"result": orchestrator(query, customer_id)}
+    result = await orchestrator(query, customer_id)
+    return {"result": result}

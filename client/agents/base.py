@@ -1,39 +1,44 @@
 """
-client/agents/base.py — Shared tool executor with permission enforcement.
+client/agents/base.py — Shared tool executor with MCP + permission enforcement.
 
-All specialist agents use run_tool() to call tools.
-Permission checks happen here — if an agent tries to call a tool
-it is not allowed to use, the call is blocked and logged.
+All specialist agents use run_tool() to call tools.  It now goes through
+the MCP server (via an open MCPClient session) instead of importing
+Python functions directly from the tool registry.
+
+Permission checks still happen here — if an agent tries to call a tool
+it is not allowed to use, the call is blocked and logged before the
+MCP request is made.
 """
 
 import time
-from server.tools.tool_registry import registry
+from client.mcp.client import MCPClient, MCPToolError, MCPConnectionError
 from client.security.permission_checker import check_permission
 
 
-def run_tool(tool_name: str, log_func=None, query: str = "",
-             agent_name: str = None, denial_log: list = None, **kwargs) -> dict:
+async def run_tool(
+    mcp: MCPClient,
+    tool_name: str,
+    *,
+    agent_name: str | None = None,
+    denial_log: list | None = None,
+    **kwargs,
+) -> dict:
     """
-    Execute a tool with:
+    Execute a tool via the MCP server with:
     - Permission check (blocks unauthorised agent→tool calls)
     - Timing measurement
-    - Optional logging via log_func
+    - Error handling with graceful fallback
 
     Args:
-        tool_name:   Name of the tool to call.
-        log_func:    Optional logging function (server logger).
-        query:       Original user query (for logging).
-        agent_name:  Name of calling agent (for permission check).
-        denial_log:  List to append permission denials to (for agent logger).
-        **kwargs:    Arguments passed to the tool function.
+        mcp:         An open MCPClient session to call tools through.
+        tool_name:   MCP tool name (e.g. "get_customer", "get_risk_score").
+        agent_name:  Calling agent's name (for permission check).
+        denial_log:  List to append permission denials to.
+        **kwargs:    Arguments passed to the MCP tool.
 
     Returns:
         Tool result dict, or {"error": "..."} if blocked or failed.
     """
-    tool = registry.get(tool_name)
-    if not tool:
-        return {"error": f"Tool {tool_name} not found in registry"}
-
     # ── Permission check ──────────────────────────────────────────────────
     if agent_name:
         if not check_permission(agent_name, tool_name):
@@ -47,20 +52,23 @@ def run_tool(tool_name: str, log_func=None, query: str = "",
                 denial_log.append(denial)
             return {"error": denial["reason"]}
 
-    # ── Execute ───────────────────────────────────────────────────────────
+    # ── Call via MCP ──────────────────────────────────────────────────────
     start = time.time()
     try:
-        result  = tool["function"](**kwargs)
+        result = await mcp.call(tool_name, **kwargs)
         latency = (time.time() - start) * 1000
-        if log_func:
-            log_func(user_query=query, tool_name=tool_name,
-                     input_data=kwargs, output_data=result, latency_ms=latency)
+        print(f"  ⚡ {tool_name} → {latency:.0f}ms (via MCP)")
         return result
+
+    except MCPToolError as e:
+        latency = (time.time() - start) * 1000
+        print(f"  ✕ {tool_name} → error after {latency:.0f}ms: {e}")
+        return {"error": str(e)}
+
+    except MCPConnectionError as e:
+        return {"error": str(e)}
 
     except Exception as e:
         latency = (time.time() - start) * 1000
-        err = {"error": str(e)}
-        if log_func:
-            log_func(user_query=query, tool_name=tool_name,
-                     input_data=kwargs, output_data=err, latency_ms=latency)
-        return err
+        print(f"  ✕ {tool_name} → unexpected error after {latency:.0f}ms: {e}")
+        return {"error": str(e)}

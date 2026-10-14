@@ -15,7 +15,7 @@ Run as HTTP server (SSE transport — for web clients):
 import json
 import sys
 import argparse
-from mcp.server import FastMCP
+from mcp.server.mcpserver import MCPServer
 from server.tools.customer_tools import get_customer_profile
 from server.tools.loan_tools import check_loan_status, credit_score_tool
 from server.tools.risk_tools import risk_score_tool, fraud_check_tool
@@ -45,9 +45,8 @@ args = parser.parse_args()
 # ---------------------------------------------------------------------------
 # Create the MCP server — port is passed in so --port flag is respected
 # ---------------------------------------------------------------------------
-mcp = FastMCP(
+mcp = MCPServer(
     name="finance-mcp-server",
-    port=args.port,
     instructions=(
         "You are connected to a simulated finance company's server. "
         "You can look up customer profiles, check loans, score credit risk, "
@@ -614,7 +613,6 @@ NEXT STEPS:
 if __name__ == "__main__":
     if args.http:
         print(f"🚀 Finance MCP Server running on http://localhost:{args.port}/sse")
-        mcp.run(transport="sse")
+        mcp.run(transport="sse", port=args.port)
     else:
-        # stdio transport — used by Claude Desktop and Claude Code
         mcp.run(transport="stdio")

@@ -1,23 +1,28 @@
 """
-client/agents/orchestrator.py — Multi-Agent Orchestrator.
+client/agents/orchestrator.py — Async Multi-Agent Orchestrator (MCP-powered).
 
 The orchestrator:
-1. Reads the user query
+1. Opens a single MCP session (one SSE connection to the MCP server)
 2. Decides which specialist agents to call (can call multiple)
-3. Runs them 
+3. Runs them concurrently via asyncio.gather — each agent calls its
+   MCP tools through the shared session
 4. Collects all results
 5. Synthesises a final answer from all agent outputs
 
-Each specialist agent has its own ReAct loop and tool permissions.
-This is genuine multi-agent collaboration.
+Every tool call in the system now goes through the MCP protocol.
 """
 
+import asyncio
 import json
+import time
+
 from client.llm.llm_engine import safe_json_llm
+from client.mcp.client import MCPClient, MCPConnectionError
 from client.agents.customer_agent import customer_agent
 from client.agents.loan_agent     import loan_agent
 from client.agents.risk_agent     import risk_agent
 from client.agents.trading_agent  import trading_agent
+
 
 # ---------------------------------------------------------------------------
 # Agent registry — what each agent is responsible for
@@ -45,6 +50,7 @@ AGENTS = {
     },
 }
 
+
 # ---------------------------------------------------------------------------
 # Step 1 — Orchestrator decides which agents to call
 # ---------------------------------------------------------------------------
@@ -65,7 +71,6 @@ def plan_agents(query: str) -> list[str]:
     Uses keyword matching as primary router (fast, reliable with phi3).
     Falls back to LLM only for ambiguous queries with no keyword matches.
     """
-    # Keyword routing first — much faster and more reliable than phi3
     keyword_result = _keyword_plan(query)
 
     # If keywords gave a clear answer, use it
@@ -88,28 +93,18 @@ def _keyword_plan(query: str) -> list[str]:
     q      = query.lower()
     agents = []
 
-    # Full analysis — all agents
     if any(k in q for k in ["full", "complete", "everything", "all", "overview",
                               "analysis", "summary", "report"]):
         return list(AGENTS.keys())
 
-    # Customer agent
-    if any(k in q for k in ["customer", "profile", "who", "name", "email",
-                              "identity"]):
+    if any(k in q for k in ["customer", "profile", "who", "name", "email", "identity"]):
         agents.append("customer")
-
-    # Loan agent
     if any(k in q for k in ["loan", "credit", "borrow", "approve", "approval",
                               "interest", "debt", "repay", "mortgage"]):
         agents.append("loan")
-
-    # Risk agent — fraud keywords get risk agent, NOT customer
     if any(k in q for k in ["risk", "fraud", "suspicious", "safe", "scam",
-                              "flag", "threat", "danger", "unusual", "check fraud",
-                              "fraud check", "detect"]):
+                              "flag", "threat", "danger", "unusual", "detect"]):
         agents.append("risk")
-
-    # Trading agent
     if any(k in q for k in ["portfolio", "trade", "pnl", "profit", "loss",
                               "stock", "holding", "position", "investment",
                               "market", "price", "return", "gain"]):
@@ -119,26 +114,37 @@ def _keyword_plan(query: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Step 2 — Run each agent and collect results
+# Step 2 — Run each agent concurrently via the shared MCP session
 # ---------------------------------------------------------------------------
-def run_agents(agent_names: list[str], query: str, customer_id: int) -> dict:
+async def run_agents(
+    mcp: MCPClient,
+    agent_names: list[str],
+    query: str,
+    customer_id: int,
+) -> dict:
     """
-    Run each specialist agent and collect their results.
-    Each agent runs its own ReAct loop independently.
-    Returns: {agent_name: {answer, observations, steps}}
+    Run each specialist agent concurrently through the shared MCP session.
+    Each agent calls its own MCP tools independently.
+    Returns: {agent_name: {answer, observations, steps, denials}}
     """
-    results = {}
-    for name in agent_names:
+
+    async def _run_one(name: str) -> tuple[str, dict]:
         agent_fn = AGENTS[name]["fn"]
         try:
-            results[name] = agent_fn(query, customer_id)
+            result = await agent_fn(mcp, query, customer_id)
+            return name, result
         except Exception as e:
-            results[name] = {
+            return name, {
                 "answer":       f"Agent error: {e}",
                 "observations": {},
                 "steps":        [],
+                "denials":      [],
             }
-    return results
+
+    # Run all agents concurrently — they share the MCP session
+    # but each calls different tools so there's no conflict
+    pairs = await asyncio.gather(*[_run_one(name) for name in agent_names])
+    return dict(pairs)
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +164,7 @@ def synthesise(query: str, agent_results: dict) -> str:
 
     # ── Customer section ──────────────────────────────────────────────────
     cust_obs = customer_res.get("observations", {})
-    profile  = cust_obs.get("get_customer_profile", {})
+    profile  = cust_obs.get("get_customer", {})
     if profile and "name" in profile:
         sections.append(
             f"👤 CUSTOMER\n"
@@ -169,8 +175,8 @@ def synthesise(query: str, agent_results: dict) -> str:
 
     # ── Loan / Credit section ─────────────────────────────────────────────
     loan_obs = loan_res.get("observations", {})
-    credit   = loan_obs.get("credit_score_tool", {})
-    loans    = loan_obs.get("check_loan_status", [])
+    credit   = loan_obs.get("get_credit_score", {})
+    loans    = loan_obs.get("get_loan_status", [])
 
     if credit or "loan" in agent_results:
         loan_lines = ["🏦 CREDIT & LOANS"]
@@ -184,15 +190,18 @@ def synthesise(query: str, agent_results: dict) -> str:
         if isinstance(loans, list) and loans:
             total    = sum(float(l.get("amount", 0)) for l in loans)
             statuses = list(set(l.get("status", "?") for l in loans))
-            loan_lines.append(f"  Active loans:  {len(loans)} totalling ${total:,.2f} ({', '.join(statuses)})")
+            loan_lines.append(
+                f"  Active loans:  {len(loans)} totalling ${total:,.2f} "
+                f"({', '.join(statuses)})"
+            )
         else:
             loan_lines.append(f"  Active loans:  None on record")
         sections.append("\n".join(loan_lines))
 
     # ── Risk section ──────────────────────────────────────────────────────
     risk_obs = risk_res.get("observations", {})
-    risk_d   = risk_obs.get("risk_score_tool", {})
-    fraud_d  = risk_obs.get("fraud_check_tool", {})
+    risk_d   = risk_obs.get("get_risk_score", {})
+    fraud_d  = risk_obs.get("check_fraud", {})
 
     if risk_d or fraud_d:
         risk_lines = ["⚠️  RISK & FRAUD"]
@@ -211,7 +220,6 @@ def synthesise(query: str, agent_results: dict) -> str:
         if fraud_d:
             flag  = "🔴 FLAGGED" if fraud_d.get("fraud_flag") else "🟢 Clear"
             conf  = fraud_d.get("confidence", "")
-            # Keep fraud reason short — first sentence only
             reason = fraud_d.get("reason", "")
             reason = reason.split(".")[0] + "." if reason else ""
             conf_str = f" ({conf} confidence)" if conf else ""
@@ -222,19 +230,23 @@ def synthesise(query: str, agent_results: dict) -> str:
 
     # ── Trading section ───────────────────────────────────────────────────
     trading_obs = trading_res.get("observations", {})
-    portfolio   = trading_obs.get("get_portfolio", [])
-    pnl         = trading_obs.get("calculate_pnl", {})
+    portfolio   = trading_obs.get("get_trading_portfolio", [])
+    pnl         = trading_obs.get("get_pnl", {})
 
     if isinstance(portfolio, list) and portfolio or pnl:
         trading_lines = ["📈 PORTFOLIO"]
         if isinstance(portfolio, list) and portfolio:
             symbols = [p.get("symbol", "?") for p in portfolio]
-            trading_lines.append(f"  Holdings:      {len(portfolio)} position(s) — {', '.join(symbols)}")
+            trading_lines.append(
+                f"  Holdings:      {len(portfolio)} position(s) — {', '.join(symbols)}"
+            )
             for p in portfolio[:3]:
                 qty   = p.get("quantity", 0)
                 sym   = p.get("symbol", "?")
                 price = p.get("avg_price", 0)
-                trading_lines.append(f"                 {sym}: {qty} shares @ ${float(price):,.2f}")
+                trading_lines.append(
+                    f"                 {sym}: {qty} shares @ ${float(price):,.2f}"
+                )
         if pnl and "total_pnl" in pnl:
             total     = float(pnl["total_pnl"])
             direction = "profit 🟢" if total >= 0 else "loss 🔴"
@@ -248,31 +260,35 @@ def synthesise(query: str, agent_results: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Main entry point
+# Main entry point — now async, opens one MCP session for the whole run
 # ---------------------------------------------------------------------------
-def orchestrator(query: str, customer_id: int = 1) -> dict:
+async def orchestrator(query: str, customer_id: int = 1) -> dict:
     """
-    Full multi-agent orchestration:
+    Full multi-agent orchestration (MCP-powered):
     1. Plan which agents to call
-    2. Run each agent (each has its own ReAct loop + permission checks)
-    3. Synthesise results into a final answer
-    4. Log the full session to agent_logs table
+    2. Open a single MCP session
+    3. Run each agent concurrently (each calls MCP tools through the session)
+    4. Synthesise results into a final answer
+    5. Log the full session
     """
-    import time
-    from server.models.agent_log import AgentLog
-    from server.db import Base, engine
-    # Ensure agent_logs table exists
-    Base.metadata.create_all(bind=engine)
-
     session_start = time.time()
     agent_names   = plan_agents(query)
-    agent_results = run_agents(agent_names, query, customer_id)
-    final_answer  = synthesise(query, agent_results)
 
-    total_tools = sum(len(r.get("steps", [])) for r in agent_results.values())
+    # One MCP connection for the entire orchestration run
+    async with MCPClient() as mcp:
+        agent_results = await run_agents(mcp, agent_names, query, customer_id)
+
+        # The MCP client tracks every tool call made during the session
+        mcp_calls = [
+            {"tool": r.tool_name, "args": r.arguments, "ok": r.ok}
+            for r in mcp.call_log
+        ]
+
+    final_answer  = synthesise(query, agent_results)
+    total_tools   = sum(len(r.get("steps", [])) for r in agent_results.values())
     total_latency = (time.time() - session_start) * 1000
 
-    # Collect RAG policies retrieved per agent
+    # Collect RAG policies per agent
     rag_retrieved = {}
     for name, res in agent_results.items():
         policies = []
@@ -281,14 +297,35 @@ def orchestrator(query: str, customer_id: int = 1) -> dict:
                 policies.extend(step["rag_policies"])
         rag_retrieved[name] = policies
 
-    # Collect permission denials from all agents
+    # Collect permission denials
     all_denials = []
     for name, res in agent_results.items():
         all_denials.extend(res.get("denials", []))
 
-    # Log the full session
+    # Log the session
+    sid = _log_session(
+        query, customer_id, agent_names, agent_results,
+        rag_retrieved, all_denials, final_answer, total_latency,
+    )
+
+    return {
+        "answer":        final_answer,
+        "agents_called": agent_names,
+        "agent_results": agent_results,
+        "total_tools":   total_tools,
+        "mcp_calls":     mcp_calls,
+        "session_id":    sid,
+        "denials":       all_denials,
+    }
+
+
+def _log_session(query, customer_id, agent_names, agent_results,
+                 rag_retrieved, all_denials, final_answer, total_latency):
+    """Log session — non-fatal if it fails."""
     try:
         from server.logger_agent import log_agent_session, new_session_id
+        from server.db import Base, engine
+        Base.metadata.create_all(bind=engine)
         sid = new_session_id()
         log_agent_session(
             session_id         = sid,
@@ -301,35 +338,23 @@ def orchestrator(query: str, customer_id: int = 1) -> dict:
             final_answer       = final_answer,
             total_latency_ms   = total_latency,
         )
+        return sid
     except Exception as e:
         print(f"⚠️  Session logging failed (non-fatal): {e}")
-        sid = "unknown"
-
-    return {
-        "answer":        final_answer,
-        "agents_called": agent_names,
-        "agent_results": agent_results,
-        "total_tools":   total_tools,
-        "session_id":    sid,
-        "denials":       all_denials,
-    }
+        return "unknown"
 
 
 # ---------------------------------------------------------------------------
-# Legacy helpers (used by /agent/* endpoints and stream)
+# Legacy helpers (kept for backward-compatible endpoints)
 # ---------------------------------------------------------------------------
 def route_agent(query: str) -> str:
     agents = plan_agents(query)
     return agents[0] if agents else "customer"
 
 
-def _keyword_fallback(query: str) -> str:
-    return _keyword_plan(query)[0]
-
-
-def react_agent(query: str, customer_id: int = 1) -> dict:
+async def react_agent(query: str, customer_id: int = 1) -> dict:
     """Alias so existing /agent/react endpoint still works."""
-    result = orchestrator(query, customer_id)
+    result = await orchestrator(query, customer_id)
     steps  = []
     for name, r in result.get("agent_results", {}).items():
         for s in r.get("steps", []):
@@ -342,34 +367,14 @@ def react_agent(query: str, customer_id: int = 1) -> dict:
     }
 
 
-def build_react_prompt(query, customer_id, history):
-    """Legacy stub."""
-    return ""
-
-
-def execute_tool(tool_name, args):
-    """Legacy stub."""
-    from server.tools.tool_registry import registry
-    tool = registry.get(tool_name)
-    return tool["function"](**args) if tool else {"error": "not found"}
-
-
-def _summarise_observations(query, obs):
-    return synthesise(query, {"customer": {"observations": obs, "steps": []}})
-
-
-def build_rich_response_from_steps(steps):
-    return ""
-
-
 AVAILABLE_TOOLS = {
-    "get_customer":          "Fetch customer profile",
-    "get_loan_status":       "Get loan records",
-    "get_credit_score":      "Calculate credit score",
-    "get_risk_score":        "Run risk assessment",
-    "check_fraud":           "Run fraud detection",
-    "get_trading_portfolio": "Get portfolio holdings",
-    "get_pnl":               "Calculate PnL",
-    "get_market_price":      "Get market price",
-    "full_customer_analysis":"Run all analyses",
+    "get_customer":           "Fetch customer profile",
+    "get_loan_status":        "Get loan records",
+    "get_credit_score":       "Calculate credit score",
+    "get_risk_score":         "Run risk assessment",
+    "check_fraud":            "Run fraud detection",
+    "get_trading_portfolio":  "Get portfolio holdings",
+    "get_pnl":                "Calculate PnL",
+    "get_market_price":       "Get market price",
+    "full_customer_analysis": "Run all analyses",
 }
