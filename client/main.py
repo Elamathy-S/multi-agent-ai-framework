@@ -408,7 +408,7 @@ async def chat_respond(req: ChatRequest):
     Calls the right MCP tool then asks Ollama to explain the result.
     """
     import time as _time
-    from client.llm.llm_engine import safe_json_llm
+    from client.llm import safe_json_llm
     _start = _time.time()
 
     tool_name, param_names = resolve_tool(req.message)
@@ -523,7 +523,7 @@ async def chat_stream(message: str, customer_id: int = 1, symbol: str = "AAPL"):
     Routes through the full multi-agent orchestrator — all tool calls
     go through MCP, agents run concurrently.
     """
-    from client.llm.llm_engine import safe_json_llm
+    from client.llm import safe_json_llm
 
     async def event_generator():
         def step(status: str, label: str, detail: str = ""):
@@ -689,12 +689,57 @@ async def react_agent_stream(message: str, customer_id: int = 1):
             yield evt("done", "done", json.dumps({"error": str(e)}))
             return
 
-        # Step 3 — Synthesise
+        # Step 3 — Synthesise structured report
         yield evt("thinking", "🔀 Synthesising results", "Combining all agent outputs...")
         await asyncio.sleep(0)
 
-        final_answer = synthesise(message, agent_results)
+        structured_answer = synthesise(message, agent_results)
         all_raw = {name: r.get("observations", {}) for name, r in agent_results.items()}
+
+        # Step 4 — Ollama summary (optional, falls back to structured report)
+        final_answer = structured_answer
+        try:
+            from client.llm import safe_json_llm
+            yield evt("llm", "🧠 Summarising with Ollama",
+                       f"Asking {os.getenv('OLLAMA_MODEL', 'phi3')} to explain...")
+            await asyncio.sleep(0)
+
+            summary_system = (
+                "You are a senior financial analyst. The user asked a question and "
+                "multiple AI agents gathered data. Below is the structured report. "
+                "Write a clear, conversational 3-5 sentence summary using the actual "
+                "numbers and findings. Do not use bullet points or headers. "
+                'Reply with JSON only: {"reply": "<your summary>"}'
+            )
+            summary_user = (
+                f"User question: {message}\n\n"
+                f"Agent report:\n{structured_answer}"
+            )
+            llm_result = safe_json_llm(summary_system, summary_user)
+
+            if "error" not in llm_result:
+                raw_reply = (
+                    llm_result.get("reply")
+                    or llm_result.get("response")
+                    or llm_result.get("text")
+                    or ""
+                )
+                if isinstance(raw_reply, dict):
+                    raw_reply = raw_reply.get("text") or str(raw_reply)
+                raw_reply = str(raw_reply).strip()
+                if raw_reply and not raw_reply.startswith("{"):
+                    final_answer = raw_reply
+                    yield evt("llm_done", "✅ Summary ready", "")
+                    await asyncio.sleep(0)
+                else:
+                    yield evt("llm_done", "Using structured report", "LLM returned invalid output")
+                    await asyncio.sleep(0)
+            else:
+                yield evt("llm_done", "Using structured report", "Ollama unavailable")
+                await asyncio.sleep(0)
+        except Exception:
+            yield evt("llm_done", "Using structured report", "Ollama not running")
+            await asyncio.sleep(0)
 
         yield evt("done", "done", json.dumps({
             "reply":         final_answer,

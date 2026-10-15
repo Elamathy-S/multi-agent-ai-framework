@@ -12,7 +12,6 @@ from client.agents.react import react_loop
 TOOLS = {
     "get_trading_portfolio": "Get current stock holdings (symbol, quantity, avg purchase price)",
     "get_pnl":               "Calculate unrealised profit/loss per position vs current market price",
-    "get_market_price":      "Get latest simulated price for a stock symbol (AAPL, TSLA, MSFT, GOOG, AMZN)",
 }
 
 PERSONA = (
@@ -20,7 +19,6 @@ PERSONA = (
     "You analyse portfolios and trading performance. "
     "For portfolio questions, start with get_trading_portfolio. "
     "If asked about profit/loss or performance, call get_pnl. "
-    "If asked about a specific stock price, call get_market_price with the symbol. "
     "Call multiple tools if the question requires a complete picture."
 )
 

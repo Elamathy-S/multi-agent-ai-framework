@@ -16,7 +16,7 @@ import asyncio
 import json
 import time
 
-from client.llm.llm_engine import safe_json_llm
+from client.llm import safe_json_llm
 from client.mcp.client import MCPClient, MCPConnectionError
 from client.agents.customer_agent import customer_agent
 from client.agents.loan_agent     import loan_agent
@@ -153,110 +153,167 @@ async def run_agents(
 def synthesise(query: str, agent_results: dict) -> str:
     """
     Build a structured, readable final answer from all agent outputs.
-    Each section has a clear header and concise content.
+
+    Works in two layers:
+    1. Per-tool formatters (TOOL_FORMATTERS) handle known tools nicely.
+    2. A generic fallback auto-formats any unknown tool result as key-value
+       pairs, so adding a new tool never breaks the synthesiser.
+
+    Each agent's observations are processed in the order they appear.
     """
     sections = []
 
-    customer_res = agent_results.get("customer", {})
-    loan_res     = agent_results.get("loan", {})
-    risk_res     = agent_results.get("risk", {})
-    trading_res  = agent_results.get("trading", {})
+    # Process agents in a consistent display order
+    for agent_name in ("customer", "loan", "risk", "trading"):
+        agent_res = agent_results.get(agent_name, {})
+        obs = agent_res.get("observations", {})
+        if not obs:
+            continue
 
-    # ── Customer section ──────────────────────────────────────────────────
-    cust_obs = customer_res.get("observations", {})
-    profile  = cust_obs.get("get_customer", {})
-    if profile and "name" in profile:
-        sections.append(
-            f"👤 CUSTOMER\n"
-            f"  Name:    {profile.get('name', '?')}\n"
-            f"  Email:   {profile.get('email', '?')}\n"
-            f"  Account: since {profile.get('created_at', '?')}"
-        )
+        icon = AGENTS.get(agent_name, {}).get("icon", "📌")
+        title = AGENTS.get(agent_name, {}).get("description", agent_name.title())
+        lines = [f"{icon} {title.upper()}"]
 
-    # ── Loan / Credit section ─────────────────────────────────────────────
-    loan_obs = loan_res.get("observations", {})
-    credit   = loan_obs.get("get_credit_score", {})
-    loans    = loan_obs.get("get_loan_status", [])
+        for tool_name, data in obs.items():
+            if isinstance(data, dict) and "error" in data:
+                lines.append(f"  ⚠ {tool_name}: {data['error']}")
+                continue
 
-    if credit or "loan" in agent_results:
-        loan_lines = ["🏦 CREDIT & LOANS"]
-        if credit:
-            score    = credit.get("credit_score", "?")
-            rating   = credit.get("rating", "?")
-            likely   = credit.get("loan_approval_likelihood", "")
-            loan_lines.append(f"  Credit score:  {score} ({rating})")
-            if likely and likely != "?":
-                loan_lines.append(f"  Loan approval: {likely}")
-        if isinstance(loans, list) and loans:
-            total    = sum(float(l.get("amount", 0)) for l in loans)
-            statuses = list(set(l.get("status", "?") for l in loans))
-            loan_lines.append(
-                f"  Active loans:  {len(loans)} totalling ${total:,.2f} "
-                f"({', '.join(statuses)})"
-            )
-        else:
-            loan_lines.append(f"  Active loans:  None on record")
-        sections.append("\n".join(loan_lines))
+            formatter = TOOL_FORMATTERS.get(tool_name, _format_generic)
+            tool_lines = formatter(data)
+            lines.extend(f"  {line}" for line in tool_lines)
 
-    # ── Risk section ──────────────────────────────────────────────────────
-    risk_obs = risk_res.get("observations", {})
-    risk_d   = risk_obs.get("get_risk_score", {})
-    fraud_d  = risk_obs.get("check_fraud", {})
-
-    if risk_d or fraud_d:
-        risk_lines = ["⚠️  RISK & FRAUD"]
-        if risk_d:
-            score   = risk_d.get("risk_score", "?")
-            level   = risk_d.get("level", "?")
-            rec     = risk_d.get("recommendation", "")
-            factors = risk_d.get("key_risk_factors", [])
-            risk_lines.append(f"  Risk score:    {score}/100 ({level})")
-            if factors:
-                risk_lines.append(f"  Key factors:   {factors[0]}")
-                if len(factors) > 1:
-                    risk_lines.append(f"                 {factors[1]}")
-            if rec:
-                risk_lines.append(f"  Action:        {rec[:120]}")
-        if fraud_d:
-            flag  = "🔴 FLAGGED" if fraud_d.get("fraud_flag") else "🟢 Clear"
-            conf  = fraud_d.get("confidence", "")
-            reason = fraud_d.get("reason", "")
-            reason = reason.split(".")[0] + "." if reason else ""
-            conf_str = f" ({conf} confidence)" if conf else ""
-            risk_lines.append(f"  Fraud status:  {flag}{conf_str}")
-            if reason:
-                risk_lines.append(f"  Reason:        {reason[:100]}")
-        sections.append("\n".join(risk_lines))
-
-    # ── Trading section ───────────────────────────────────────────────────
-    trading_obs = trading_res.get("observations", {})
-    portfolio   = trading_obs.get("get_trading_portfolio", [])
-    pnl         = trading_obs.get("get_pnl", {})
-
-    if isinstance(portfolio, list) and portfolio or pnl:
-        trading_lines = ["📈 PORTFOLIO"]
-        if isinstance(portfolio, list) and portfolio:
-            symbols = [p.get("symbol", "?") for p in portfolio]
-            trading_lines.append(
-                f"  Holdings:      {len(portfolio)} position(s) — {', '.join(symbols)}"
-            )
-            for p in portfolio[:3]:
-                qty   = p.get("quantity", 0)
-                sym   = p.get("symbol", "?")
-                price = p.get("avg_price", 0)
-                trading_lines.append(
-                    f"                 {sym}: {qty} shares @ ${float(price):,.2f}"
-                )
-        if pnl and "total_pnl" in pnl:
-            total     = float(pnl["total_pnl"])
-            direction = "profit 🟢" if total >= 0 else "loss 🔴"
-            trading_lines.append(f"  Unrealised:    ${abs(total):,.2f} {direction}")
-        sections.append("\n".join(trading_lines))
+        if len(lines) > 1:  # more than just the header
+            sections.append("\n".join(lines))
 
     if not sections:
         return "Analysis complete — no data found."
 
     return "\n\n".join(sections)
+
+
+# ---------------------------------------------------------------------------
+# Per-tool formatters — each returns a list of display lines.
+# If a key is missing the .get() returns a safe default, so changing
+# the tool's return shape never crashes — it just shows "?" for that field.
+# ---------------------------------------------------------------------------
+
+def _fmt_customer(d: dict) -> list[str]:
+    return [
+        f"Name:    {d.get('name', '?')}",
+        f"Email:   {d.get('email', '?')}",
+        f"Account: since {d.get('created_at', '?')}",
+    ]
+
+
+def _fmt_credit_score(d: dict) -> list[str]:
+    lines = [f"Credit score:  {d.get('credit_score', '?')} ({d.get('rating', '?')})"]
+    likely = d.get("loan_approval_likelihood", "")
+    if likely:
+        lines.append(f"Loan approval: {likely}")
+    factors = d.get("factors", [])
+    if factors:
+        lines.append(f"Factors:       {', '.join(factors[:3])}")
+    return lines
+
+
+def _fmt_loan_status(d) -> list[str]:
+    if not isinstance(d, list) or not d:
+        return ["Active loans:  None on record"]
+    total = sum(float(l.get("amount", 0)) for l in d)
+    statuses = sorted(set(l.get("status", "?") for l in d))
+    return [
+        f"Active loans:  {len(d)} totalling ${total:,.2f} ({', '.join(statuses)})",
+    ]
+
+
+def _fmt_risk_score(d: dict) -> list[str]:
+    lines = [f"Risk score:    {d.get('risk_score', '?')}/100 ({d.get('level', '?')})"]
+    factors = d.get("key_risk_factors", [])
+    if factors:
+        lines.append(f"Key factors:   {'; '.join(factors[:3])}")
+    rec = d.get("recommendation", "")
+    if rec:
+        lines.append(f"Action:        {rec[:120]}")
+    return lines
+
+
+def _fmt_fraud(d: dict) -> list[str]:
+    flag = "🔴 FLAGGED" if d.get("fraud_flag") else "🟢 Clear"
+    conf = d.get("confidence", "")
+    conf_str = f" ({conf} confidence)" if conf else ""
+    lines = [f"Fraud status:  {flag}{conf_str}"]
+    reason = d.get("reason", "")
+    if reason:
+        lines.append(f"Reason:        {reason.split('.')[0]}.")
+    return lines
+
+
+def _fmt_portfolio(d) -> list[str]:
+    if not isinstance(d, list) or not d:
+        return ["No holdings found"]
+    symbols = [p.get("symbol", "?") for p in d]
+    lines = [f"Holdings:      {len(d)} position(s) — {', '.join(symbols)}"]
+    for p in d[:5]:
+        sym = p.get("symbol", "?")
+        qty = p.get("quantity", 0)
+        price = p.get("avg_price", 0)
+        lines.append(f"               {sym}: {qty} shares @ ${float(price):,.2f}")
+    return lines
+
+
+def _fmt_pnl(d: dict) -> list[str]:
+    total = d.get("total_pnl")
+    if total is None:
+        return ["PnL data unavailable"]
+    total_f = float(total)
+    direction = "profit 🟢" if total_f >= 0 else "loss 🔴"
+    return [f"Unrealised:    ${abs(total_f):,.2f} {direction}"]
+
+
+def _fmt_market_price(d: dict) -> list[str]:
+    return [f"{d.get('symbol', '?')}: ${d.get('price', '?')}"]
+
+
+def _fmt_list_customers(d) -> list[str]:
+    if not isinstance(d, list):
+        return ["No customer data"]
+    return [f"Found {len(d)} customer(s)"] + [
+        f"  #{c.get('id','?')} {c.get('name','?')} ({c.get('email','')})"
+        for c in d[:5]
+    ]
+
+
+def _format_generic(d) -> list[str]:
+    """
+    Fallback formatter for any tool not in TOOL_FORMATTERS.
+    Auto-formats dict keys or list items — so adding a new tool
+    to mcp_server.py never breaks the synthesiser.
+    """
+    if isinstance(d, list):
+        return [f"{len(d)} record(s) returned"]
+    if isinstance(d, dict):
+        lines = []
+        for k, v in list(d.items())[:8]:
+            if isinstance(v, (list, dict)):
+                v = json.dumps(v, default=str)[:80]
+            lines.append(f"{k}: {v}")
+        return lines
+    return [str(d)[:200]]
+
+
+# Tool name → formatter function
+TOOL_FORMATTERS = {
+    "get_customer":           _fmt_customer,
+    "list_customers":         _fmt_list_customers,
+    "get_credit_score":       _fmt_credit_score,
+    "get_loan_status":        _fmt_loan_status,
+    "get_risk_score":         _fmt_risk_score,
+    "check_fraud":            _fmt_fraud,
+    "get_trading_portfolio":  _fmt_portfolio,
+    "get_pnl":                _fmt_pnl,
+    "get_market_price":       _fmt_market_price,
+}
 
 
 # ---------------------------------------------------------------------------

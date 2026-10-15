@@ -1,13 +1,14 @@
 """
 client/agents/base.py — Shared tool executor with MCP + permission enforcement.
 
-All specialist agents use run_tool() to call tools.  It now goes through
-the MCP server (via an open MCPClient session) instead of importing
-Python functions directly from the tool registry.
+All specialist agents use run_tool() to call tools.  Each call opens
+a fresh MCP connection, executes the tool, and closes — this avoids
+SSE timeout issues when slow LLM calls happen between tool calls
+in the ReAct loop.
 
-Permission checks still happen here — if an agent tries to call a tool
-it is not allowed to use, the call is blocked and logged before the
-MCP request is made.
+Permission checks happen here — if an agent tries to call a tool
+it is not allowed to use, the call is blocked before the MCP
+request is made.
 """
 
 import time
@@ -16,7 +17,7 @@ from client.security.permission_checker import check_permission
 
 
 async def run_tool(
-    mcp: MCPClient,
+    mcp: MCPClient | None,
     tool_name: str,
     *,
     agent_name: str | None = None,
@@ -26,11 +27,13 @@ async def run_tool(
     """
     Execute a tool via the MCP server with:
     - Permission check (blocks unauthorised agent→tool calls)
+    - Fresh MCP connection per call (avoids SSE timeout during ReAct)
     - Timing measurement
     - Error handling with graceful fallback
 
     Args:
-        mcp:         An open MCPClient session to call tools through.
+        mcp:         Optional MCPClient (ignored — kept for API compat).
+                     Each call opens its own short-lived connection.
         tool_name:   MCP tool name (e.g. "get_customer", "get_risk_score").
         agent_name:  Calling agent's name (for permission check).
         denial_log:  List to append permission denials to.
@@ -52,10 +55,11 @@ async def run_tool(
                 denial_log.append(denial)
             return {"error": denial["reason"]}
 
-    # ── Call via MCP ──────────────────────────────────────────────────────
+    # ── Call via MCP (fresh connection per call) ──────────────────────────
     start = time.time()
     try:
-        result = await mcp.call(tool_name, **kwargs)
+        async with MCPClient() as fresh_mcp:
+            result = await fresh_mcp.call(tool_name, **kwargs)
         latency = (time.time() - start) * 1000
         print(f"  ⚡ {tool_name} → {latency:.0f}ms (via MCP)")
         return result

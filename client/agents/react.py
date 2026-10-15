@@ -10,7 +10,7 @@ cannot produce valid reasoning (handles phi3 unreliability).
 """
 
 import json
-from client.llm.llm_engine import safe_json_llm
+from client.llm import safe_json_llm
 from client.mcp.client import MCPClient
 from client.agents.base import run_tool
 
@@ -178,7 +178,7 @@ async def react_loop(
 
 
 # ---------------------------------------------------------------------------
-# Fallback — call all tools sequentially 
+# Fallback — call all tools sequentially (current behaviour)
 # ---------------------------------------------------------------------------
 async def _fallback_run(
     mcp: MCPClient,

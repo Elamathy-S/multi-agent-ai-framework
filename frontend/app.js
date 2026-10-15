@@ -1,6 +1,8 @@
 // frontend/app.js — Finance AI chat UI logic
 
-const API    = 'http://localhost:8080';
+const API    = (window.location.hostname === 'localhost' || window.location.protocol === 'file:')
+             ? 'http://localhost:8080'
+             : `${window.location.protocol}//${window.location.host}`;
 const msgEl  = document.getElementById('messages');
 const inputEl= document.getElementById('input');
 const sendBtn= document.getElementById('send-btn');
@@ -44,6 +46,8 @@ function ask(text) { inputEl.value = text; send(); }
 const STATUS_ICONS = {
   start: '🤖', thinking: '💭', planned: '📋',
   agent_start: '▶', agent_done: '✓', tool_call: '⚡',
+  routing: '🔀', routed: '✓', mcp_call: '🔌', mcp_done: '✓',
+  llm: '🧠', llm_done: '✓',
   finish: '✅', error: '✕', done: '✓',
 };
 
@@ -75,10 +79,11 @@ async function send() {
   msgEl.appendChild(feedDiv);
   scrollBottom();
 
-  const url = `${API}/chat/stream?message=${encodeURIComponent(text)}&customer_id=${cid}`;
+  // Use the multi-agent orchestrator endpoint for full trace
+  const url = `${API}/agent/react/stream?message=${encodeURIComponent(text)}&customer_id=${cid}`;
   const es = new EventSource(url);
   let completed = false;
-  const traceSteps = [];  // collect all steps for the collapsible trace
+  const traceSteps = [];
 
   es.onmessage = (e) => {
     if (!e.data || e.data.trim() === '') return;
@@ -95,10 +100,7 @@ async function send() {
         const data = JSON.parse(evt.detail);
         if (data.error) addErrorMsg(data.error);
         else {
-          if (data.raw && !data.raw.trading && data.raw.holdings) {
-            data.raw = { trading: { calculate_pnl: data.raw } };
-          }
-          data._trace = traceSteps;  // attach collected steps
+          data._trace = traceSteps;
           addAIMsg(data);
         }
       } catch { addErrorMsg('Could not parse response.'); }
@@ -121,8 +123,6 @@ async function send() {
   };
 
   es.onerror = () => {
-    // EventSource fires onerror on real errors AND after normal close.
-    // Only surface an error message if we never got a 'done' event.
     if (completed) return;
 
     fetch(`${API}/health`, { signal: AbortSignal.timeout(3000) })
@@ -137,7 +137,7 @@ async function send() {
         addErrorMsg(
           'Cannot reach API server.\n' +
           'Make sure it is running:\n' +
-          '  PYTHONPATH=. python3.12 -m uvicorn client.main:app --reload --port 8080'
+          '  PYTHONPATH=. uvicorn client.main:app --reload --port 8080'
         );
       })
       .finally(() => {
@@ -150,7 +150,6 @@ async function send() {
 
 // ── Activity step renderer ─────────────────────────────────────────────────
 function addStep(feed, status, icon, label, detail, isActive) {
-  // Mark previous active step as done
   feed.querySelectorAll('.activity-step.active').forEach(s => {
     s.classList.remove('active');
     s.classList.add('done-step');
@@ -188,16 +187,18 @@ function addAIMsg(data) {
   const tid    = 'trace' + Date.now();
   const agents = data.agents_called ? data.agents_called.join(', ') : '';
   const trace  = data._trace || [];
+  const steps  = data.steps || [];
+  const toolCalls = data.tool_calls || 0;
 
   const pnlHtml = renderPnL(data.raw);
 
-  // Build collapsible trace — SSE steps + rich breakdown from raw data
-  const traceRows = buildTraceHtml(trace, data.raw);
+  // Build collapsible trace from SSE steps + agent step data
+  const traceRows = buildTraceHtml(trace, steps, data.raw, agents);
   const traceCount = trace.length;
 
   const tracePanel = traceCount ? `
     <div class="trace-toggle" onclick="toggleRaw('${tid}')">
-      <span id="arr-${tid}">▶</span> Agent trace (${traceCount} steps)
+      <span id="arr-${tid}">▶</span> Agent trace (${traceCount} steps · ${toolCalls} tool calls)
     </div>
     <div class="raw-block trace-block" id="${tid}">${traceRows}</div>
   ` : '';
@@ -206,7 +207,7 @@ function addAIMsg(data) {
   div.className = 'msg ai';
   div.innerHTML = `
     <div class="bubble">
-      <div class="tool-badge">⚙ ${esc(tool)}${agents ? ' · ' + esc(agents) : ''}</div>
+      <div class="tool-badge">⚙ ${esc(tool)}${agents ? ' · agents: ' + esc(agents) : ''}</div>
       ${tracePanel}
       <div class="report">${pnlHtml || formatReport(reply)}</div>
       <div class="raw-toggle" onclick="toggleRaw('${uid}')">
@@ -214,7 +215,7 @@ function addAIMsg(data) {
       </div>
       <div class="raw-block" id="${uid}">${esc(raw)}</div>
     </div>
-    <div class="bubble-meta">${time}${data.tool_calls ? ' · ' + data.tool_calls + ' tool calls' : ''}</div>
+    <div class="bubble-meta">${time}${toolCalls ? ' · ' + toolCalls + ' tool calls' : ''}</div>
   `;
   msgEl.appendChild(div);
   scrollBottom();
@@ -222,48 +223,90 @@ function addAIMsg(data) {
 
 /**
  * Build a rich HTML trace combining:
- * 1. SSE steps (routing, MCP call, etc.)
- * 2. Structured breakdown from raw data (agents, tools, results, flags)
+ * 1. SSE streaming steps (routing, agent start/done, tool calls)
+ * 2. Agent step details (thought, action, observation from ReAct loop)
+ * 3. Per-agent breakdown from raw data
  */
-function buildTraceHtml(steps, raw) {
+function buildTraceHtml(sseSteps, agentSteps, raw, agentsList) {
   let html = '';
 
-  // ── Section 1: MCP protocol steps ────────────────────────────────────────
-  html += traceHeader('🔌 MCP Protocol');
-  steps.forEach(s => {
+  // ── Section 1: MCP protocol steps from SSE ──────────────────────────────
+  html += traceHeader('🔌 MCP protocol flow');
+  sseSteps.forEach(s => {
     const isErr = s.status === 'error';
     html += traceRow(isErr ? '✕' : '✓', s.label, s.detail, isErr ? 'error' : 'ok');
   });
 
-  if (!raw || typeof raw !== 'object') return html;
+  // ── Section 2: ReAct agent steps (thought → action → observation) ───────
+  if (agentSteps && agentSteps.length) {
+    html += traceHeader('🧠 ReAct reasoning steps');
+    agentSteps.forEach((step, i) => {
+      const agent  = step.agent || '?';
+      const action = step.action || '?';
+      const thought = step.thought || '';
 
-  // ── Section 2: Agents & tools called ─────────────────────────────────────
-  // Detect which domains were touched from the raw keys
-  const domains = {
-    'Customer':  raw.profile   ? { icon: '👤', tools: [['get_customer_profile',  raw.profile]] } : null,
-    'Loan':      raw.credit    ? { icon: '🏦', tools: [
-                                    ['credit_score_tool',  raw.credit],
-                                    raw.loans?.length ? ['check_loan_status', raw.loans] : null,
-                                  ].filter(Boolean) } : null,
-    'Risk':      raw.risk      ? { icon: '⚠️', tools: [
-                                    ['risk_score_tool',  raw.risk],
-                                    raw.fraud ? ['fraud_check_tool', raw.fraud] : null,
-                                  ].filter(Boolean) } : null,
-    'Trading':   raw.portfolio_pnl ? { icon: '📈', tools: [
-                                    ['get_portfolio',    raw.portfolio_pnl.holdings],
-                                    ['calculate_pnl',   raw.portfolio_pnl],
-                                  ] } : null,
-  };
+      // Show the thought
+      if (thought) {
+        html += traceRow('💭', `${agent}: ${thought}`, '', 'muted');
+      }
 
-  const activeDomains = Object.entries(domains).filter(([, v]) => v);
-  if (activeDomains.length) {
-    html += traceHeader(`🤖 Agents Called (${activeDomains.length})`);
-    activeDomains.forEach(([name, { icon, tools }]) => {
-      html += traceRow(icon, `${name} Agent`, `${tools.length} tool(s)`, 'agent');
-      tools.forEach(([toolName]) => {
-        html += traceRow('⚡', toolName, '', 'tool');
-      });
+      // Show the action
+      if (action === 'finish') {
+        html += traceRow('✅', `${agent}: finish`, '', 'ok');
+      } else {
+        // Show tool call
+        const obs = step.obs || {};
+        const hasError = obs && typeof obs === 'object' && 'error' in obs;
+        html += traceRow('⚡', `${agent} → ${action}`, '', hasError ? 'error' : 'tool');
+
+        // Show observation summary
+        if (hasError) {
+          html += traceRow('✕', `Error: ${obs.error}`, '', 'error');
+        } else if (typeof obs === 'object' && !Array.isArray(obs)) {
+          const keys = Object.keys(obs).slice(0, 3).join(', ');
+          html += traceRow('📄', `Result: {${keys}, ...}`, '', 'muted');
+        } else if (Array.isArray(obs)) {
+          html += traceRow('📄', `Result: ${obs.length} record(s)`, '', 'muted');
+        }
+      }
     });
+  }
+
+  // ── Section 3: Per-agent data summary ───────────────────────────────────
+  if (raw && typeof raw === 'object') {
+    const agentIcons = {
+      customer: '👤', loan: '🏦', risk: '⚠️', trading: '📈'
+    };
+
+    const agentEntries = Object.entries(raw).filter(([, v]) =>
+      v && typeof v === 'object' && Object.keys(v).length > 0
+    );
+
+    if (agentEntries.length) {
+      html += traceHeader(`🤖 Agent data summary (${agentEntries.length} agents)`);
+      agentEntries.forEach(([agentName, tools]) => {
+        const icon = agentIcons[agentName] || '📌';
+        const toolNames = Object.keys(tools);
+        html += traceRow(icon, `${agentName} agent`, `${toolNames.length} tool(s)`, 'agent');
+
+        toolNames.forEach(toolName => {
+          const data = tools[toolName];
+          let summary = '';
+          if (typeof data === 'object' && !Array.isArray(data) && data) {
+            // Pick key highlights
+            if (data.name)         summary = data.name;
+            else if (data.risk_score !== undefined) summary = `score: ${data.risk_score}/100 (${data.level || '?'})`;
+            else if (data.fraud_flag !== undefined) summary = data.fraud_flag ? '🔴 FLAGGED' : '🟢 Clear';
+            else if (data.credit_score !== undefined) summary = `${data.credit_score} (${data.rating || '?'})`;
+            else if (data.total_pnl !== undefined) summary = `$${parseFloat(data.total_pnl).toFixed(2)}`;
+            else summary = Object.keys(data).slice(0, 3).join(', ');
+          } else if (Array.isArray(data)) {
+            summary = `${data.length} record(s)`;
+          }
+          html += traceRow('⚡', toolName, summary, 'tool');
+        });
+      });
+    }
   }
 
   return html;
@@ -296,28 +339,34 @@ function traceRow(icon, label, detail, type = 'ok') {
 }
 
 function renderPnL(raw) {
-  const holdings = raw?.trading?.calculate_pnl?.holdings;
-  const totalPnl  = raw?.trading?.calculate_pnl?.total_pnl;
-  if (!holdings || !holdings.length) return null;
+  // Look for PnL data in the new structure: raw.trading.get_pnl
+  const pnlData  = raw?.trading?.get_pnl;
+  const holdings = raw?.trading?.get_trading_portfolio;
+  const totalPnl = pnlData?.total_pnl;
+  const positions = pnlData?.positions;
+
+  if (!positions || !positions.length) return null;
 
   const fmt  = (n) => '$' + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const sign  = (n) => n >= 0 ? '+' : '−';
   const color = (n) => n >= 0 ? 'var(--green)' : 'var(--red)';
   const arrow = (n) => n >= 0 ? '▲' : '▼';
 
-  let rows = holdings.map(h => {
-    const pnl        = h.pnl;
-    const pctChange  = ((h.current_price - h.avg_price) / h.avg_price * 100).toFixed(1);
+  let rows = positions.map(h => {
+    const pnl        = h.pnl || 0;
+    const avgPrice   = h.avg_price || 0;
+    const curPrice   = h.current_price || avgPrice;
+    const pctChange  = avgPrice > 0 ? ((curPrice - avgPrice) / avgPrice * 100).toFixed(1) : '0.0';
     const pnlColor   = color(pnl);
 
     return `
       <div class="pnl-row">
-        <span class="pnl-symbol">${esc(h.symbol)}</span>
-        <span class="pnl-qty">${h.quantity} shares</span>
+        <span class="pnl-symbol">${esc(h.symbol || '?')}</span>
+        <span class="pnl-qty">${h.quantity || '?'} shares</span>
         <span class="pnl-prices">
-          <span class="pnl-avg">avg ${fmt(h.avg_price)}</span>
+          <span class="pnl-avg">avg ${fmt(avgPrice)}</span>
           <span class="pnl-arrow">→</span>
-          <span class="pnl-cur">${fmt(h.current_price)}</span>
+          <span class="pnl-cur">${fmt(curPrice)}</span>
         </span>
         <span class="pnl-value" style="color:${pnlColor}">
           ${arrow(pnl)} ${sign(pnl)}${fmt(pnl)}
@@ -366,13 +415,13 @@ function esc(s) {
 
 /**
  * Format a plain-text agent reply into HTML report sections.
- * Detects structured reports (emoji section headers like 👤 CUSTOMER)
- * and renders them as labeled key-value rows. Falls back to plain text.
+ * Detects structured reports (emoji section headers) and renders
+ * them as labeled key-value rows. Falls back to plain text.
  */
 function formatReport(text) {
   if (!text) return '';
 
-  const isReport = /[👤🏦⚠️📈]\s+[A-Z]/.test(text);
+  const isReport = /[👤🏦⚠️📈📌]\s+[A-Z]/.test(text);
   if (!isReport) {
     return esc(text).replace(/\n/g, '<br>');
   }
@@ -385,7 +434,7 @@ function formatReport(text) {
     if (!lines.length) continue;
 
     const firstLine = lines[0];
-    const isHeader  = /^[👤🏦⚠️📈🔍💰📋]/.test(firstLine);
+    const isHeader  = /^[👤🏦⚠️📈🔍💰📋📌]/.test(firstLine);
 
     if (isHeader) {
       html += '<div class="report-section">';
