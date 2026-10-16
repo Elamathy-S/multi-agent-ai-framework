@@ -13,7 +13,7 @@ request is made.
 
 import time
 from client.mcp.client import MCPClient, MCPToolError, MCPConnectionError
-from client.security.permission_checker import check_permission
+from client.security.permissions import check_permission
 
 
 async def run_tool(

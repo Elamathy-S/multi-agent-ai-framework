@@ -16,7 +16,7 @@ import asyncio
 import json
 import time
 
-from client.llm import safe_json_llm
+from server.llm import safe_json_llm
 from client.mcp.client import MCPClient, MCPConnectionError
 from client.agents.customer_agent import customer_agent
 from client.agents.loan_agent     import loan_agent

@@ -117,6 +117,7 @@ def _tfidf_query(index: dict, query: str, n: int) -> list[dict]:
 
 # ── Public API ────────────────────────────────────────────────────────────
 _index = None
+_category_cache: dict[str, dict] = {}  # category → cached TF-IDF index
 
 
 def _load_index():
@@ -193,10 +194,10 @@ def retrieve(query: str, n_results: int = 3, category: str = None) -> list[dict]
 
     else:  # tfidf
         if category:
-            # Filter tfidf index by category
-            filtered_idx = _tfidf_index(docs)
-            results = _tfidf_query(filtered_idx, query, n_results)
-            return results
+            # Use cached per-category index (built once, reused)
+            if category not in _category_cache:
+                _category_cache[category] = _tfidf_index(docs)
+            return _tfidf_query(_category_cache[category], query, n_results)
         return _tfidf_query(idx, query, n_results)
 
 

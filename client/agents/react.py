@@ -10,7 +10,7 @@ cannot produce valid reasoning (handles phi3 unreliability).
 """
 
 import json
-from client.llm import safe_json_llm
+from server.llm import safe_json_llm
 from client.mcp.client import MCPClient
 from client.agents.base import run_tool
 

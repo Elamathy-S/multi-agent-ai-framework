@@ -1,9 +1,9 @@
 """
-client/security/permissions.py — Agent-to-tool permission matrix.
+client/security/permissions.py — Agent-to-tool permission matrix + checker.
 
 Keys are agent names, values are sets of MCP tool names each agent
-is authorised to call.  Any call not listed here is denied by
-check_permission() in base.py.
+is authorised to call. Any call not listed here is denied by
+check_permission() before the MCP request is made.
 
 Tool names match the MCP server registrations in mcp_server.py.
 """
@@ -30,3 +30,9 @@ ROLE_PERMISSIONS = {
         "get_market_price",
     },
 }
+
+
+def check_permission(agent_name: str, tool_name: str) -> bool:
+    """Check whether an agent is authorised to call a tool."""
+    allowed_tools = ROLE_PERMISSIONS.get(agent_name, set())
+    return tool_name in allowed_tools

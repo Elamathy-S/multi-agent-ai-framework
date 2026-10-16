@@ -408,7 +408,7 @@ async def chat_respond(req: ChatRequest):
     Calls the right MCP tool then asks Ollama to explain the result.
     """
     import time as _time
-    from client.llm import safe_json_llm
+    from server.llm import safe_json_llm
     _start = _time.time()
 
     tool_name, param_names = resolve_tool(req.message)
@@ -523,7 +523,7 @@ async def chat_stream(message: str, customer_id: int = 1, symbol: str = "AAPL"):
     Routes through the full multi-agent orchestrator — all tool calls
     go through MCP, agents run concurrently.
     """
-    from client.llm import safe_json_llm
+    from server.llm import safe_json_llm
 
     async def event_generator():
         def step(status: str, label: str, detail: str = ""):
@@ -676,6 +676,16 @@ async def react_agent_stream(message: str, customer_id: int = 1):
                     agent_results[agent_name] = result
 
                     steps = result.get("steps", [])
+
+                    # Show RAG policies if any were retrieved
+                    rag_policies = []
+                    for s in steps:
+                        rag_policies.extend(s.get("rag_policies", []))
+                    if rag_policies:
+                        unique_policies = list(dict.fromkeys(rag_policies))  # deduplicate
+                        yield evt("rag", f"  📚 RAG: {', '.join(unique_policies[:3])}", f"{len(unique_policies)} policy doc(s)")
+                        await asyncio.sleep(0)
+
                     for s in steps:
                         yield evt("tool_call", f"  ⚡ {s.get('action','?')}", s.get("thought","")[:60])
                         await asyncio.sleep(0)
@@ -699,7 +709,7 @@ async def react_agent_stream(message: str, customer_id: int = 1):
         # Step 4 — Ollama summary (optional, falls back to structured report)
         final_answer = structured_answer
         try:
-            from client.llm import safe_json_llm
+            from server.llm import safe_json_llm
             yield evt("llm", "🧠 Summarising with Ollama",
                        f"Asking {os.getenv('OLLAMA_MODEL', 'phi3')} to explain...")
             await asyncio.sleep(0)
@@ -1041,7 +1051,7 @@ def list_permissions():
 @app.post("/security/check", tags=["Security"])
 def check_permission_endpoint(payload: dict):
     """Test whether an agent is allowed to call a tool."""
-    from client.security.permission_checker import check_permission
+    from client.security.permissions import check_permission
     agent   = payload.get("agent", "")
     tool    = payload.get("tool", "")
     allowed = check_permission(agent, tool)
