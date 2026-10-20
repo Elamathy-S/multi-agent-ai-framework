@@ -1,5 +1,7 @@
 # Multi-Agent AI Framework
 
+![CI](https://github.com/Elamathy-S/multi-agent-ai-framework/actions/workflows/ci.yml/badge.svg)
+
 A modular multi-agent system for financial operations, built on the **Model Context Protocol (MCP)**. Specialist AI agents handle risk assessment, fraud detection, credit scoring, loan analysis, and portfolio management — each reasoning independently through a ReAct loop and communicating exclusively via the MCP protocol.
 
 Built as a Masters project to explore agentic AI architectures with real protocol-level communication, not just function calls.
@@ -86,8 +88,9 @@ The MCP server is the **single source of truth** for all tools. Agents don't imp
 - **Live agent trace** — the frontend streams every step: orchestrator planning, agent start/done, tool calls with thoughts, data summaries
 - **Concurrent execution** — independent agents run in parallel via `asyncio.gather`
 - **Ollama summarisation** — structured data is passed through a local LLM for conversational summaries
-- **Session logging** — every orchestration run is logged with agent results, tool calls, RAG retrievals, and permission denials
-- **62 test cases** — unit tests for routing, permissions, and formatting; integration tests for the full MCP pipeline
+- **Docker + Docker Compose** — one command to run the full stack
+- **CI/CD** — GitHub Actions runs tests and evals on every push
+- **Multi-tier eval framework** — validation checks, live AI evals, and quality metrics (robustness, precision/recall, resilience)
 
 ---
 
@@ -102,6 +105,8 @@ The MCP server is the **single source of truth** for all tools. Agents don't imp
 | RAG | ChromaDB for vector search, TF-IDF fallback |
 | Frontend | HTML, CSS, vanilla JS — SSE streaming |
 | Testing | pytest, pytest-asyncio |
+| CI/CD | GitHub Actions |
+| Containerisation | Docker, Docker Compose |
 
 ---
 
@@ -131,11 +136,10 @@ The MCP server is the **single source of truth** for all tools. Agents don't imp
 │   │   ├── risk_agent.py       # Risk scoring + fraud detection
 │   │   └── trading_agent.py    # Portfolio + PnL
 │   └── security/
-│       ├── permissions.py      # Agent → tool permission matrix
-│       └── permission_checker.py
+│       └── permissions.py      # Agent → tool permission matrix + checker
 │
 ├── rag/                        # Retrieval-Augmented Generation
-│   ├── embedder.py             # ChromaDB + TF-IDF indexing
+│   ├── embedder.py             # ChromaDB + TF-IDF indexing (cached per category)
 │   ├── retriever.py            # Policy document retrieval
 │   ├── documents.py            # Policy document definitions
 │   └── build_index.py          # Index builder script
@@ -148,14 +152,25 @@ The MCP server is the **single source of truth** for all tools. Agents don't imp
 ├── data/
 │   └── seed_data.py            # Database seeder (10 customers, loans, trades)
 │
-├── tests/                      # Test suite (62 cases)
+├── tests/                      # Unit + integration tests (72 cases)
 │   ├── test_tool_router.py     # Query routing tests
 │   ├── test_permissions.py     # Permission matrix tests
 │   ├── test_orchestrator.py    # Planning + synthesis tests
 │   └── test_mcp_integration.py # End-to-end MCP pipeline tests
 │
+├── evals/                      # AI evaluation framework
+│   ├── eval_dataset.py         # 31 offline eval cases
+│   ├── test_evals.py           # Offline eval runner (pytest)
+│   ├── run_evals.py            # Offline eval report with scores
+│   ├── eval_live.py            # Live AI evals (12 cases, needs servers)
+│   └── eval_quality.py         # Quality metrics (robustness, precision/recall, resilience)
+│
+├── Dockerfile                  # Container image
+├── docker-compose.yml          # Full stack: MCP server + client + Ollama
+├── .github/workflows/ci.yml    # GitHub Actions CI pipeline
 ├── claude_desktop_config.json  # Claude Desktop MCP configuration
 ├── requirements.txt
+├── pytest.ini
 ├── .env.example
 └── .gitignore
 ```
@@ -169,7 +184,17 @@ The MCP server is the **single source of truth** for all tools. Agents don't imp
 - Python 3.12+
 - [Ollama](https://ollama.com) installed
 
-### 1. Clone and install
+### Option A: Docker (recommended)
+
+```bash
+git clone https://github.com/Elamathy-S/multi-agent-ai-framework.git
+cd multi-agent-ai-framework
+docker-compose up
+```
+
+Then open `frontend/index.html` in your browser.
+
+### Option B: Manual setup
 
 ```bash
 git clone https://github.com/Elamathy-S/multi-agent-ai-framework.git
@@ -179,41 +204,24 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. Start Ollama
-
+Start Ollama:
 ```bash
 ollama serve
-ollama pull phi3          # main model
+ollama pull phi3
 ```
 
-### 3. Seed the database (first time only)
-
-```bash
-PYTHONPATH=. python3 data/seed_data.py
-```
-
-### 4. Build RAG index (optional, first time only)
-
-```bash
-PYTHONPATH=. python3 rag/build_index.py
-```
-
-### 5. Start the MCP server
-
+Start the MCP server (terminal 1):
 ```bash
 PYTHONPATH=. python3 -m server.mcp_server --http --port 8001
 ```
 
-### 6. Start the client server (new terminal)
-
+Start the client server (terminal 2):
 ```bash
 source venv/bin/activate
 PYTHONPATH=. uvicorn client.main:app --reload --port 8080
 ```
 
-### 7. Open the frontend
-
-Open `frontend/index.html` in your browser. Try:
+Open `frontend/index.html` and try:
 - "Who is customer 3?" — single agent, one tool call
 - "What is the risk level for customer 1?" — risk agent with ReAct reasoning
 - "Give me a full financial analysis" — all 4 agents run concurrently
@@ -223,7 +231,6 @@ Open `frontend/index.html` in your browser. Try:
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/chat` | POST | Single MCP tool call (keyword-routed) |
-| `/chat/stream` | GET | Single tool with SSE streaming |
 | `/agent/react/stream` | GET | Full multi-agent orchestration with live trace |
 | `/agent/react` | POST | Multi-agent orchestration (JSON response) |
 | `/agent/{type}` | POST | Call a specific agent directly |
@@ -233,15 +240,53 @@ Open `frontend/index.html` in your browser. Try:
 | `/health` | GET | Server + MCP + database status |
 | `/docs` | GET | Swagger UI |
 
-### Run tests
+---
+
+## Testing & Evaluation
+
+### Tests (72 cases)
 
 ```bash
-# Unit tests (no servers needed)
+# Unit tests — no servers needed (~1s)
 PYTHONPATH=. pytest tests/test_tool_router.py tests/test_permissions.py tests/test_orchestrator.py -v
 
-# Full suite (needs MCP server running)
+# Full suite including MCP integration — needs MCP server running
 PYTHONPATH=. pytest -v
 ```
+
+### Evals — three tiers
+
+**Tier 1: Validation checks** (31 cases, ~10s, runs in CI)
+
+Deterministic checks for routing, permissions, tool coverage, RAG retrieval, and synthesis output. Expected: 100%.
+
+```bash
+PYTHONPATH=. python evals/run_evals.py
+```
+
+**Tier 2: AI quality metrics** (5 categories, ~10s, no servers needed)
+
+| Metric | What it measures | Why it matters |
+|--------|-----------------|----------------|
+| Prompt Robustness | Same intent phrased 7 ways → consistent routing? | Users don't phrase queries the same way |
+| Synthesis Quality | Output completeness — are all key data points captured? | Weighted scoring: critical fields = 2pts, nice-to-haves = 1pt |
+| Error Resilience | Graceful degradation on missing/null/malformed data? | Production systems get dirty data |
+| RAG Precision/Recall | Right docs retrieved? F1 score? | Measures retrieval quality, not just "did it work" |
+| Routing Consistency | Same query 3x → same result? | Catches hidden non-determinism |
+
+```bash
+PYTHONPATH=. python evals/eval_quality.py
+```
+
+**Tier 3: Live AI evals** (12 cases, ~20min, needs MCP + Ollama)
+
+Tests actual LLM decision-making with real tool calls. Measures ReAct reasoning success rate, answer quality, and data completeness.
+
+```bash
+PYTHONPATH=. python evals/eval_live.py
+```
+
+**Key finding:** With phi3, ReAct reasoning succeeds 33% of the time — the agent falls back to sequential tool execution the other 67%. The fallback ensures reliability (data is always correct), but a stronger model would improve intelligent tool selection. The eval framework measures this directly.
 
 ---
 
@@ -292,3 +337,5 @@ See `.env.example` for all options:
 **Permission enforcement before MCP** — The permission check runs locally in `base.py` before the MCP request is made. Unauthorised calls never hit the wire. Every denial is logged.
 
 **Structured synthesis + LLM summary** — `synthesise()` formats raw data into a readable report using per-tool formatters. Then Ollama writes a conversational summary. If Ollama is down, the structured report is shown as-is.
+
+**Three-tier evaluation** — Validation checks (deterministic, CI), quality metrics (robustness/precision/recall, fast), and live AI evals (real LLM calls, measures reasoning quality). The tiers are designed so daily development uses fast evals, and thorough evaluation happens before releases.
