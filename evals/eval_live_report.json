@@ -1,0 +1,136 @@
+{
+  "timestamp": "2026-10-19T21:41:39.016478",
+  "type": "live",
+  "overall_score": 83.3,
+  "total_passed": 10,
+  "total_cases": 12,
+  "categories": {
+    "ReAct Efficiency": {
+      "passed": 3,
+      "total": 3,
+      "score": 100.0
+    },
+    "Answer Quality": {
+      "passed": 3,
+      "total": 3,
+      "score": 100.0
+    },
+    "ReAct vs Fallback": {
+      "passed": 1,
+      "total": 3,
+      "score": 33.3
+    },
+    "Security": {
+      "passed": 1,
+      "total": 1,
+      "score": 100.0
+    },
+    "Data Completeness": {
+      "passed": 2,
+      "total": 2,
+      "score": 100.0
+    }
+  },
+  "reasoning_modes": {
+    "fallback": 9,
+    "react": 3
+  },
+  "results": [
+    {
+      "id": "live_01",
+      "category": "ReAct Efficiency",
+      "passed": true,
+      "detail": "Used 1 steps, expected \u22642",
+      "latency_ms": 34019,
+      "reasoning_mode": "fallback"
+    },
+    {
+      "id": "live_02",
+      "category": "ReAct Efficiency",
+      "passed": true,
+      "detail": "Tools called: ['get_risk_score', 'check_fraud']",
+      "latency_ms": 688951,
+      "reasoning_mode": "fallback"
+    },
+    {
+      "id": "live_03",
+      "category": "ReAct Efficiency",
+      "passed": true,
+      "detail": "Tools called: ['get_credit_score', 'get_loan_status', 'get_credit_score', 'get_loan_status']",
+      "latency_ms": 700195,
+      "reasoning_mode": "fallback"
+    },
+    {
+      "id": "live_04",
+      "category": "Answer Quality",
+      "passed": true,
+      "detail": "Answer: 'Customer 1, Benjamin Olsen was created on September 19, 2024.'",
+      "latency_ms": 72412,
+      "reasoning_mode": "react"
+    },
+    {
+      "id": "live_05",
+      "category": "Answer Quality",
+      "passed": true,
+      "detail": "Answer: 'get_risk_score \u2192 customer_id: 1, risk_score: 45, level: LOW | check_fraud \u2192 cust'",
+      "latency_ms": 526988,
+      "reasoning_mode": "fallback"
+    },
+    {
+      "id": "live_06",
+      "category": "Answer Quality",
+      "passed": true,
+      "detail": "Answer: 'get_trading_portfolio \u2192 3 record(s) | get_pnl \u2192 customer_id: 1, total_pnl: 24287'",
+      "latency_ms": 289554,
+      "reasoning_mode": "fallback"
+    },
+    {
+      "id": "live_07",
+      "category": "ReAct vs Fallback",
+      "passed": true,
+      "detail": "Mode: react",
+      "latency_ms": 118973,
+      "reasoning_mode": "react"
+    },
+    {
+      "id": "live_08",
+      "category": "ReAct vs Fallback",
+      "passed": false,
+      "detail": "Mode: fallback",
+      "latency_ms": 471667,
+      "reasoning_mode": "fallback"
+    },
+    {
+      "id": "live_09",
+      "category": "ReAct vs Fallback",
+      "passed": false,
+      "detail": "Mode: fallback",
+      "latency_ms": 1245411,
+      "reasoning_mode": "fallback"
+    },
+    {
+      "id": "live_10",
+      "category": "Security",
+      "passed": true,
+      "detail": "Denials: []",
+      "latency_ms": 4212741,
+      "reasoning_mode": "react"
+    },
+    {
+      "id": "live_11",
+      "category": "Data Completeness",
+      "passed": true,
+      "detail": "Observations: ['get_risk_score:ok', 'check_fraud:ok']",
+      "latency_ms": 9240588,
+      "reasoning_mode": "fallback"
+    },
+    {
+      "id": "live_12",
+      "category": "Data Completeness",
+      "passed": true,
+      "detail": "Observations: ['list', 'dict']",
+      "latency_ms": 246609,
+      "reasoning_mode": "fallback"
+    }
+  ]
+}

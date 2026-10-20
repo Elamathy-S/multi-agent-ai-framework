@@ -142,6 +142,6 @@ class MCPClient:
             raise MCPConnectionError("Session not open")
         result = await self._session.list_tools()
         return [
-            {"name": t.name, "description": t.description or "", "schema": t.inputSchema}
+            {"name": t.name, "description": t.description or "", "schema": t.input_schema}
             for t in result.tools
         ]

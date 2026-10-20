@@ -1,0 +1,54 @@
+version: "3.9"
+
+services:
+  # ── MCP Server (port 8001) ────────────────────────────────
+  mcp-server:
+    build: .
+    container_name: mcp-server
+    command: python -m server.mcp_server --http --port 8001
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./finance_sim.db:/app/finance_sim.db
+      - ./rag:/app/rag
+    environment:
+      - PYTHONPATH=/app
+      - OLLAMA_URL=http://ollama:11434
+    depends_on:
+      - ollama
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/sse')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ── FastAPI Client Server (port 8080) ─────────────────────
+  client-server:
+    build: .
+    container_name: client-server
+    command: uvicorn client.main:app --host 0.0.0.0 --port 8080
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./finance_sim.db:/app/finance_sim.db
+      - ./rag:/app/rag
+    environment:
+      - PYTHONPATH=/app
+      - MCP_SERVER_URL=http://mcp-server:8001/sse
+      - OLLAMA_URL=http://ollama:11434
+      - OLLAMA_MODEL=phi3
+    depends_on:
+      mcp-server:
+        condition: service_healthy
+
+  # ── Ollama (local LLM) ───────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+
+volumes:
+  ollama_data:

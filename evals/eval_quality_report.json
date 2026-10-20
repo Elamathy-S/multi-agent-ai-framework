@@ -1,0 +1,76 @@
+{
+  "timestamp": "2026-10-20T16:47:25.425352",
+  "type": "quality",
+  "weighted_average": 94.2,
+  "evaluations": [
+    {
+      "name": "Prompt Robustness",
+      "description": "Same intent phrased differently \u2192 consistent routing",
+      "passed": 34,
+      "total": 35,
+      "score": 97.1,
+      "failures": [
+        {
+          "intent": "fraud_detection",
+          "phrasing": "is something fishy going on",
+          "expected": [
+            "risk"
+          ],
+          "got": [
+            "customer"
+          ],
+          "missing": [
+            "risk"
+          ]
+        }
+      ],
+      "latency_ms": 885
+    },
+    {
+      "name": "Synthesis Quality",
+      "description": "Output completeness \u2014 does the answer capture all key data points?",
+      "passed": 47,
+      "total": 47,
+      "score": 100.0,
+      "failures": [],
+      "latency_ms": 0
+    },
+    {
+      "name": "Error Resilience",
+      "description": "Graceful degradation \u2014 no crashes on bad/missing data",
+      "passed": 6,
+      "total": 7,
+      "score": 85.7,
+      "failures": [
+        {
+          "case": "err_string_amount",
+          "reason": "Crashed: ValueError: could not convert string to float: 'ten thousand'"
+        }
+      ],
+      "latency_ms": 0
+    },
+    {
+      "name": "RAG Precision/Recall",
+      "description": "Precision: 79.2% | Recall: 100.0% | F1: 88.4%",
+      "passed": 88,
+      "total": 100,
+      "score": 88.4,
+      "failures": [],
+      "metrics": {
+        "precision": 79.2,
+        "recall": 100.0,
+        "f1": 88.4
+      },
+      "latency_ms": 158
+    },
+    {
+      "name": "Routing Consistency",
+      "description": "Same query \u2192 same routing across 3 runs",
+      "passed": 8,
+      "total": 8,
+      "score": 100.0,
+      "failures": [],
+      "latency_ms": 5
+    }
+  ]
+}

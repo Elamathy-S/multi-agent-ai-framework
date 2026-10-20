@@ -1,0 +1,38 @@
+{
+  "timestamp": "2026-10-19T16:38:46.075271",
+  "overall_score": 100.0,
+  "total_passed": 30,
+  "total_cases": 30,
+  "categories": {
+    "Routing": {
+      "passed": 8,
+      "total": 8,
+      "score": 100.0,
+      "failures": []
+    },
+    "Tool Selection": {
+      "passed": 8,
+      "total": 8,
+      "score": 100.0,
+      "failures": []
+    },
+    "RAG Retrieval": {
+      "passed": 6,
+      "total": 6,
+      "score": 100.0,
+      "failures": []
+    },
+    "Permissions": {
+      "passed": 5,
+      "total": 5,
+      "score": 100.0,
+      "failures": []
+    },
+    "End-to-End": {
+      "passed": 3,
+      "total": 3,
+      "score": 100.0,
+      "failures": []
+    }
+  }
+}

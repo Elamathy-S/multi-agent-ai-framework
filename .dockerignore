@@ -1,0 +1,17 @@
+__pycache__
+*.pyc
+.git
+.gitignore
+.env
+venv/
+.venv/
+.DS_Store
+*.egg-info
+.idea/
+.vscode/
+tests/
+evals/
+*.md
+docker-compose.yml
+Dockerfile
+cleanup*.sh
