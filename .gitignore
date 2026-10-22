@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.code-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+
+# Generated eval reports (keep eval_live_report.json for demo)
+evals/eval_report.json
+evals/eval_quality_report.json
+
+# Cleanup scripts (one-time use)
+cleanup*.sh

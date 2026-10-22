@@ -20,7 +20,6 @@ from server.tools.customer_tools import get_customer_profile
 from server.tools.loan_tools import check_loan_status, credit_score_tool
 from server.tools.risk_tools import risk_score_tool, fraud_check_tool
 from server.tools.trading_tools import get_portfolio, calculate_pnl
-from server.tools.tool_registry import init_tools
 from server.db import SessionLocal, engine, Base
 from server.models.customer import Customer
 from server.models.market import MarketPrice
@@ -30,7 +29,6 @@ from server.models.market import MarketPrice
 # Bootstrap: create tables + register legacy tool registry (used by agents)
 # ---------------------------------------------------------------------------
 Base.metadata.create_all(bind=engine)
-init_tools()
 
 
 # ---------------------------------------------------------------------------
