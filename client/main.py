@@ -33,7 +33,16 @@ from pydantic import BaseModel
 from server.db import engine, Base
 from server.models.tool_log import ToolLog
 from server.models.agent_log import AgentLog
+from server.models.rbac import Role, RolePermission, AccessAuditLog
 Base.metadata.create_all(bind=engine)
+
+# RBAC — seed default roles on startup
+from client.security.rbac import (
+    seed_default_roles, get_all_roles, get_role, create_role,
+    add_permission, revoke_permission, toggle_role,
+    get_audit_log, get_audit_stats,
+)
+seed_default_roles()
 
 # MCP client — the execution path for all tool calls
 from client.mcp.client import MCPClient, MCPConnectionError
@@ -608,30 +617,111 @@ def get_tool_usage_log(limit: int = 50):
         db.close()
 
 
-@app.get("/security/permissions", tags=["Security"])
-def list_permissions():
-    """Show all agent-tool permission mappings."""
-    from client.security.permissions import ROLE_PERMISSIONS
+# ===========================================================================
+# RBAC — Role-Based Access Control management
+# ===========================================================================
+
+@app.get("/security/roles", tags=["RBAC"])
+def list_roles():
+    """List all roles with their permissions."""
+    roles = get_all_roles()
     return {
-        "permissions": {agent: sorted(tools) for agent, tools in ROLE_PERMISSIONS.items()},
-        "total_agents": len(ROLE_PERMISSIONS),
-        "total_rules":  sum(len(t) for t in ROLE_PERMISSIONS.values()),
+        "total_roles": len(roles),
+        "roles": roles,
     }
 
 
-@app.post("/security/check", tags=["Security"])
+@app.get("/security/roles/{role_name}", tags=["RBAC"])
+def get_role_endpoint(role_name: str):
+    """Get a single role and its permissions."""
+    role = get_role(role_name)
+    if not role:
+        raise HTTPException(status_code=404, detail=f"Role '{role_name}' not found")
+    return role
+
+
+@app.post("/security/roles", tags=["RBAC"])
+def create_role_endpoint(payload: dict):
+    """
+    Create a new role.
+    Body: {"name": "audit_agent", "description": "Read-only auditor", "permissions": ["get_customer"]}
+    """
+    name = payload.get("name", "")
+    if not name:
+        return {"error": "Missing 'name' field"}
+    result = create_role(
+        name=name,
+        description=payload.get("description", ""),
+        permissions=payload.get("permissions", []),
+    )
+    return result
+
+
+@app.post("/security/roles/{role_name}/grant", tags=["RBAC"])
+def grant_permission_endpoint(role_name: str, payload: dict):
+    """
+    Grant a tool permission to a role.
+    Body: {"tool": "get_customer"}
+    """
+    tool = payload.get("tool", "")
+    if not tool:
+        return {"error": "Missing 'tool' field"}
+    return add_permission(role_name, tool)
+
+
+@app.post("/security/roles/{role_name}/revoke", tags=["RBAC"])
+def revoke_permission_endpoint(role_name: str, payload: dict):
+    """
+    Revoke a tool permission from a role.
+    Body: {"tool": "get_customer"}
+    """
+    tool = payload.get("tool", "")
+    if not tool:
+        return {"error": "Missing 'tool' field"}
+    return revoke_permission(role_name, tool)
+
+
+@app.post("/security/roles/{role_name}/toggle", tags=["RBAC"])
+def toggle_role_endpoint(role_name: str, payload: dict):
+    """
+    Enable or disable a role.
+    Body: {"active": false}
+    """
+    active = payload.get("active", True)
+    return toggle_role(role_name, active)
+
+
+@app.post("/security/check", tags=["RBAC"])
 def check_permission_endpoint(payload: dict):
-    """Test whether an agent is allowed to call a tool."""
+    """
+    Test whether an agent is allowed to call a tool (queries the DB).
+    Body: {"agent": "risk_agent", "tool": "get_customer"}
+    """
     from client.security.permissions import check_permission
-    agent   = payload.get("agent", "")
-    tool    = payload.get("tool", "")
+    agent = payload.get("agent", "")
+    tool  = payload.get("tool", "")
     allowed = check_permission(agent, tool)
     return {
         "agent":   agent,
         "tool":    tool,
         "allowed": allowed,
-        "reason":  f"{agent} {'can' if allowed else 'cannot'} call {tool}",
+        "source":  "database",
     }
+
+
+@app.get("/security/audit", tags=["RBAC"])
+def audit_log_endpoint(limit: int = 50, denied_only: bool = False):
+    """View the access audit log — every permission check recorded."""
+    return {
+        "stats": get_audit_stats(),
+        "log": get_audit_log(limit=limit, denied_only=denied_only),
+    }
+
+
+@app.get("/security/audit/stats", tags=["RBAC"])
+def audit_stats_endpoint():
+    """Summary: total checks, allowed, denied, denial rate."""
+    return get_audit_stats()
 
 
 # ===========================================================================

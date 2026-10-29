@@ -1,1 +1,1 @@
-from client.security.permissions import check_permission
+from client.security.permissions import check_permission, seed_default_roles
