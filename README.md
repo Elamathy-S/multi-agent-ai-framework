@@ -2,340 +2,167 @@
 
 ![CI](https://github.com/Elamathy-S/multi-agent-ai-framework/actions/workflows/ci.yml/badge.svg)
 
-A modular multi-agent system for financial operations, built on the **Model Context Protocol (MCP)**. Specialist AI agents handle risk assessment, fraud detection, credit scoring, loan analysis, and portfolio management — each reasoning independently through a ReAct loop and communicating exclusively via the MCP protocol.
+A multi-agent system where AI agents handle financial tasks — risk assessment, fraud detection, credit scoring, portfolio analysis — and talk to each other through the Model Context Protocol (MCP). Each agent reasons independently, decides which tools to use, and can only access data it's authorised for.
 
-Built as a Masters project to explore agentic AI architectures with real protocol-level communication, not just function calls.
+Built as a Masters project to explore how agentic AI systems work at the protocol level.
 
----
+## What it does
+
+You ask a question like "give me a full analysis of customer 3" and the system:
+
+1. Figures out which agents need to run (customer, loan, risk, trading)
+2. Runs them at the same time
+3. Each agent thinks about what tools to call, calls them through MCP, looks at the results, and decides what to do next
+4. Combines everything into a report
+5. The frontend shows the whole reasoning process live as it happens
+
+Every tool call goes through the MCP protocol (JSON-RPC 2.0 over SSE) — agents don't call Python functions directly. The same MCP server works with Claude Desktop.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Frontend (HTML/JS)                     │
-│              Chat UI with live agent trace                │
-└──────────────────────┬──────────────────────────────────┘
-                       │ SSE stream
-┌──────────────────────▼──────────────────────────────────┐
-│              FastAPI Client Server (:8080)                │
-│                                                          │
-│  ┌─────────────────────────────────────────────────────┐ │
-│  │                  Orchestrator                        │ │
-│  │   Plans which agents to call, runs them              │ │
-│  │   concurrently, synthesises final answer             │ │
-│  │                                                      │ │
-│  │  ┌──────────┐ ┌──────────┐ ┌────────┐ ┌──────────┐ │ │
-│  │  │ Customer │ │   Loan   │ │  Risk  │ │ Trading  │ │ │
-│  │  │  Agent   │ │  Agent   │ │ Agent  │ │  Agent   │ │ │
-│  │  └────┬─────┘ └────┬─────┘ └───┬────┘ └────┬─────┘ │ │
-│  │       │             │           │            │       │ │
-│  │       └─────────────┴─────┬─────┴────────────┘       │ │
-│  │                   ReAct Loop                         │ │
-│  │            think → act → observe → repeat            │ │
-│  └───────────────────────┬─────────────────────────────┘ │
-│                          │ Permission check               │
-└──────────────────────────┼──────────────────────────────┘
-                           │ JSON-RPC 2.0 over SSE
-┌──────────────────────────▼──────────────────────────────┐
-│                MCP Server (:8001)                         │
-│                                                          │
-│   10 Tools         4 Resources        4 Prompts          │
-│   @mcp.tool()      finance://...      workflow templates  │
-│                                                          │
-│   get_customer          get_risk_score    check_fraud     │
-│   get_loan_status       get_credit_score  get_pnl         │
-│   get_trading_portfolio get_market_price  list_customers  │
-│   full_customer_analysis                                  │
-└──────────────────────────┬──────────────────────────────┘
-                           │
-              ┌────────────┴────────────┐
-              │                         │
-        ┌─────▼─────┐           ┌──────▼──────┐
-        │  SQLite    │           │  RAG Index   │
-        │  Database  │           │  ChromaDB +  │
-        │            │           │  TF-IDF      │
-        └────────────┘           └─────────────┘
+Frontend (HTML/JS)
+    │
+    ▼ SSE stream
+FastAPI Server (:8080)
+    │
+    ├── Orchestrator ── picks agents, runs them concurrently
+    │       │
+    │       ├── Customer Agent ── profiles
+    │       ├── Loan Agent ────── loans, credit scores
+    │       ├── Risk Agent ────── risk scoring, fraud detection
+    │       └── Trading Agent ─── portfolio, PnL
+    │               │
+    │               ▼
+    │       ReAct Loop (think → act → observe → repeat)
+    │               │
+    │               ▼ permission check (RBAC)
+    │
+    ▼ JSON-RPC 2.0 over SSE
+MCP Server (:8001)
+    │
+    ├── 10 tools, 4 resources, 4 prompts
+    │
+    ├── SQLite (customer, loan, trade data)
+    └── RAG (policy documents via ChromaDB + TF-IDF)
 ```
 
-### How a query flows through the system
+## Key features
 
-1. **User sends a question** — "Give me a full analysis of customer 3"
-2. **Orchestrator plans** — keyword + LLM routing selects which agents to activate
-3. **Agents run concurrently** — each enters a ReAct reasoning loop
-4. **ReAct loop** — the LLM decides which tool to call based on prior observations, or finishes when it has enough data
-5. **Every tool call goes through MCP** — permission check → JSON-RPC 2.0 request → MCP server executes → result returned
-6. **Synthesise** — per-tool formatters build a structured report, then Ollama writes a conversational summary
-7. **Live trace** — the frontend streams every step (planning, agent start, tool calls, reasoning) via SSE
+**MCP protocol** — agents communicate through JSON-RPC 2.0, not function calls. Add a new tool with one `@mcp.tool()` decorator and every agent can discover it.
 
-### Why MCP?
+**ReAct reasoning** — agents use a think-act-observe loop where the LLM decides what to do next. If the LLM can't reason properly (happens ~67% of the time with phi3), it falls back to calling all its tools — so data is always correct.
 
-The MCP server is the **single source of truth** for all tools. Agents don't import Python functions — they discover and call tools through the protocol. This means:
+**RBAC** — database-backed role-based access control. Each agent has a role with scoped permissions. The risk agent can't read customer profiles. Permissions can be changed at runtime through the API. Every access check is logged to an audit trail.
 
-- **Claude Desktop** can connect to the same MCP server and use all 10 tools
-- Adding a new tool = one `@mcp.tool()` decorator in `mcp_server.py`
-- Agents are isolated from tool implementations — they only know tool names and descriptions
-- The permission system gates access before any MCP call is made
+**RAG** — agents retrieve relevant policy documents (loan approval rules, risk thresholds) before reasoning, so decisions are grounded in domain knowledge.
 
----
+**Live trace** — the frontend streams every step as it happens: which agents were selected, what each agent is thinking, which tools are being called, what data came back.
 
-## Features
+## Tech stack
 
-- **MCP-powered execution** — all tool calls use JSON-RPC 2.0 over SSE, not direct function imports
-- **ReAct reasoning** — agents think before acting, with graceful fallback when the LLM can't reason
-- **4 specialist agents** — Customer, Loan, Risk, Trading — each with scoped permissions
-- **Permission enforcement** — agents can only call tools they're authorised for; cross-agent access is blocked and logged
-- **RAG integration** — agents retrieve relevant policy documents (loan rules, risk thresholds) from ChromaDB/TF-IDF before reasoning
-- **Live agent trace** — the frontend streams every step: orchestrator planning, agent start/done, tool calls with thoughts, data summaries
-- **Concurrent execution** — independent agents run in parallel via `asyncio.gather`
-- **Ollama summarisation** — structured data is passed through a local LLM for conversational summaries
-- **Docker + Docker Compose** — one command to run the full stack
-- **CI/CD** — GitHub Actions runs tests and evals on every push
-- **Multi-tier eval framework** — validation checks, live AI evals, and quality metrics (robustness, precision/recall, resilience)
+Python, FastAPI, MCP v2, Ollama (phi3), SQLAlchemy, SQLite, ChromaDB, Docker, GitHub Actions, pytest
 
----
+## Quick start
 
-## Tech Stack
-
-| Layer | Technology |
-|-------|-----------|
-| Protocol | MCP (Model Context Protocol) v2.x — JSON-RPC 2.0 over SSE |
-| Backend | Python, FastAPI, async/await |
-| LLM | Ollama (phi3 / phi3:mini) — runs locally, no API keys needed |
-| Database | SQLite (dev) — swappable to PostgreSQL via `DATABASE_URL` |
-| RAG | ChromaDB for vector search, TF-IDF fallback |
-| Frontend | HTML, CSS, vanilla JS — SSE streaming |
-| Testing | pytest, pytest-asyncio |
-| CI/CD | GitHub Actions |
-| Containerisation | Docker, Docker Compose |
-
----
-
-## Project Structure
-
-```
-├── server/                     # MCP server + tools + database
-│   ├── mcp_server.py           # MCP server — 10 tools, 4 resources, 4 prompts
-│   ├── db.py                   # SQLAlchemy engine + session
-│   ├── tools/                  # Tool implementations (customer, loan, risk, trading)
-│   ├── llm/                    # Ollama integration (safe_json_llm)
-│   ├── models/                 # SQLAlchemy models (ToolLog, AgentLog)
-│   └── logger_agent.py         # Session logging
-│
-├── client/                     # FastAPI client server + agents
-│   ├── main.py                 # FastAPI app — all endpoints
-│   ├── tool_router.py          # Query → MCP tool routing (single source)
-│   ├── mcp/
-│   │   ├── client.py           # MCPClient — async MCP v2 client wrapper
-│   │   └── gateway.py          # /mcp/* introspection endpoints
-│   ├── agents/
-│   │   ├── orchestrator.py     # Plans agents, runs concurrently, synthesises
-│   │   ├── react.py            # ReAct reasoning engine (think→act→observe)
-│   │   ├── base.py             # run_tool() — permission check + MCP call
-│   │   ├── customer_agent.py   # Profile lookups
-│   │   ├── loan_agent.py       # Loans + credit scoring
-│   │   ├── risk_agent.py       # Risk scoring + fraud detection
-│   │   └── trading_agent.py    # Portfolio + PnL
-│   └── security/
-│       └── permissions.py      # Agent → tool permission matrix + checker
-│
-├── rag/                        # Retrieval-Augmented Generation
-│   ├── embedder.py             # ChromaDB + TF-IDF indexing (cached per category)
-│   ├── retriever.py            # Policy document retrieval
-│   ├── documents.py            # Policy document definitions
-│   └── build_index.py          # Index builder script
-│
-├── frontend/                   # Chat UI
-│   ├── index.html
-│   ├── style.css
-│   └── app.js                  # SSE streaming + agent trace rendering
-│
-├── data/
-│   └── seed_data.py            # Database seeder (10 customers, loans, trades)
-│
-├── tests/                      # Unit + integration tests (72 cases)
-│   ├── test_tool_router.py     # Query routing tests
-│   ├── test_permissions.py     # Permission matrix tests
-│   ├── test_orchestrator.py    # Planning + synthesis tests
-│   └── test_mcp_integration.py # End-to-end MCP pipeline tests
-│
-├── evals/                      # AI evaluation framework
-│   ├── eval_dataset.py         # 31 offline eval cases
-│   ├── test_evals.py           # Offline eval runner (pytest)
-│   ├── run_evals.py            # Offline eval report with scores
-│   ├── eval_live.py            # Live AI evals (12 cases, needs servers)
-│   └── eval_quality.py         # Quality metrics (robustness, precision/recall, resilience)
-│
-├── Dockerfile                  # Container image
-├── docker-compose.yml          # Full stack: MCP server + client + Ollama
-├── .github/workflows/ci.yml    # GitHub Actions CI pipeline
-├── claude_desktop_config.json  # Claude Desktop MCP configuration
-├── requirements.txt
-├── pytest.ini
-├── .env.example
-└── .gitignore
-```
-
----
-
-## Quick Start
-
-### Prerequisites
-
-- Python 3.12+
-- [Ollama](https://ollama.com) installed
-
-### Option A: Docker (recommended)
-
+**With Docker:**
 ```bash
 git clone https://github.com/Elamathy-S/multi-agent-ai-framework.git
 cd multi-agent-ai-framework
 docker-compose up
 ```
 
-Then open `frontend/index.html` in your browser.
-
-### Option B: Manual setup
-
+**Without Docker:**
 ```bash
 git clone https://github.com/Elamathy-S/multi-agent-ai-framework.git
 cd multi-agent-ai-framework
-python3 -m venv venv
-source venv/bin/activate
+python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-```
 
-Start Ollama:
-```bash
-ollama serve
-ollama pull phi3
-```
+ollama serve && ollama pull phi3
 
-Start the MCP server (terminal 1):
-```bash
+# Terminal 1 — MCP server
 PYTHONPATH=. python3 -m server.mcp_server --http --port 8001
-```
 
-Start the client server (terminal 2):
-```bash
-source venv/bin/activate
+# Terminal 2 — Client server
 PYTHONPATH=. uvicorn client.main:app --reload --port 8080
 ```
 
-Open `frontend/index.html` and try:
-- "Who is customer 3?" — single agent, one tool call
-- "What is the risk level for customer 1?" — risk agent with ReAct reasoning
-- "Give me a full financial analysis" — all 4 agents run concurrently
+Open `frontend/index.html` and try "full analysis of customer 3".
 
-### API endpoints
+## API highlights
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/chat` | POST | Single MCP tool call (keyword-routed) |
-| `/agent/react/stream` | GET | Full multi-agent orchestration with live trace |
-| `/agent/react` | POST | Multi-agent orchestration (JSON response) |
-| `/agent/{type}` | POST | Call a specific agent directly |
-| `/mcp/tools` | GET | List MCP server tools |
-| `/mcp/surface` | GET | Full MCP surface (tools + prompts + resources) |
-| `/mcp/tools/execute` | POST | Execute any MCP tool directly |
-| `/health` | GET | Server + MCP + database status |
-| `/docs` | GET | Swagger UI |
+| Endpoint | What it does |
+|----------|-------------|
+| `GET /agent/react/stream` | Full multi-agent run with live SSE trace |
+| `POST /chat` | Single tool call, keyword-routed |
+| `GET /mcp/surface` | See all MCP tools, resources, prompts |
+| `GET /security/roles` | View RBAC roles and permissions |
+| `POST /security/roles/{name}/grant` | Grant a tool to a role at runtime |
+| `GET /security/audit` | View access audit log |
+| `GET /docs` | Swagger UI |
 
----
+## RBAC
 
-## Testing & Evaluation
-
-### Tests (72 cases)
+Roles and permissions are stored in the database, not hardcoded. You can manage them at runtime:
 
 ```bash
-# Unit tests — no servers needed (~1s)
-PYTHONPATH=. pytest tests/test_tool_router.py tests/test_permissions.py tests/test_orchestrator.py -v
+# See all roles
+curl http://localhost:8080/security/roles
 
-# Full suite including MCP integration — needs MCP server running
-PYTHONPATH=. pytest -v
+# Create a new role
+curl -X POST http://localhost:8080/security/roles \
+  -d '{"name": "audit_agent", "description": "Read-only", "permissions": ["get_customer"]}'
+
+# Grant a permission
+curl -X POST http://localhost:8080/security/roles/risk_agent/grant \
+  -d '{"tool": "get_customer"}'
+
+# Revoke it
+curl -X POST http://localhost:8080/security/roles/risk_agent/revoke \
+  -d '{"tool": "get_customer"}'
+
+# View audit trail
+curl http://localhost:8080/security/audit
 ```
 
-### Evals — three tiers
+Every permission check — allowed or denied — is logged with timestamp, agent, tool, and session ID.
 
-**Tier 1: Validation checks** (31 cases, ~10s, runs in CI)
-
-Deterministic checks for routing, permissions, tool coverage, RAG retrieval, and synthesis output. Expected: 100%.
+## Testing and evaluation
 
 ```bash
+# Unit tests (72 cases, ~1s)
+PYTHONPATH=. pytest tests/ -v
+
+# Validation checks (31 cases, ~10s)
 PYTHONPATH=. python evals/run_evals.py
-```
 
-**Tier 2: AI quality metrics** (5 categories, ~10s, no servers needed)
-
-| Metric | What it measures | Why it matters |
-|--------|-----------------|----------------|
-| Prompt Robustness | Same intent phrased 7 ways → consistent routing? | Users don't phrase queries the same way |
-| Synthesis Quality | Output completeness — are all key data points captured? | Weighted scoring: critical fields = 2pts, nice-to-haves = 1pt |
-| Error Resilience | Graceful degradation on missing/null/malformed data? | Production systems get dirty data |
-| RAG Precision/Recall | Right docs retrieved? F1 score? | Measures retrieval quality, not just "did it work" |
-| Routing Consistency | Same query 3x → same result? | Catches hidden non-determinism |
-
-```bash
+# AI quality metrics — robustness, precision/recall, resilience (~10s)
 PYTHONPATH=. python evals/eval_quality.py
-```
 
-**Tier 3: Live AI evals** (12 cases, ~20min, needs MCP + Ollama)
-
-Tests actual LLM decision-making with real tool calls. Measures ReAct reasoning success rate, answer quality, and data completeness.
-
-```bash
+# Live AI evals — real LLM calls, measures ReAct success rate (~20min)
 PYTHONPATH=. python evals/eval_live.py
 ```
 
-**Key finding:** With phi3, ReAct reasoning succeeds 33% of the time — the agent falls back to sequential tool execution the other 67%. The fallback ensures reliability (data is always correct), but a stronger model would improve intelligent tool selection. The eval framework measures this directly.
+Live eval results with phi3: 83% overall. ReAct reasoning succeeds 33% of the time — the rest falls back to sequential execution. A stronger model would improve this, and the eval framework measures that directly.
 
----
+## Project structure
 
-## Claude Desktop Integration
-
-The MCP server works with Claude Desktop. Add this to your Claude Desktop config:
-
-```json
-{
-  "mcpServers": {
-    "finance-mcp-server": {
-      "command": "python3",
-      "args": ["-m", "server.mcp_server"],
-      "cwd": "/path/to/multi-agent-ai-framework",
-      "env": {
-        "PYTHONPATH": "."
-      }
-    }
-  }
-}
+```
+server/           MCP server, tools, database, LLM engine
+client/           FastAPI app, agents, orchestrator, RBAC
+rag/              RAG pipeline (ChromaDB + TF-IDF)
+frontend/         Chat UI with live agent trace
+tests/            72 unit + integration tests
+evals/            Validation, quality metrics, live AI evals
 ```
 
-Claude can then use all 10 finance tools directly through the MCP protocol.
+## Design decisions
 
----
+**Why MCP?** — One protocol for everything. Claude Desktop connects to the same server. Agents are decoupled from tool implementations.
 
-## Environment Variables
+**Why ReAct with fallback?** — Best case: the agent intelligently picks tools. Worst case: it calls everything. Data is always correct either way.
 
-See `.env.example` for all options:
+**Why fresh MCP connection per tool?** — The LLM takes 10-30s between tool calls. A long-lived SSE connection would timeout. One connection per tool call adds ~50ms but never fails.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MCP_SERVER_URL` | `http://localhost:8001/sse` | MCP server SSE endpoint |
-| `OLLAMA_URL` | `http://localhost:11434` | Ollama API URL |
-| `OLLAMA_MODEL` | `phi3` | LLM model (`phi3:mini` for lower RAM) |
-| `DATABASE_URL` | `sqlite:///finance_sim.db` | Database connection string |
-
----
-
-## Key Design Decisions
-
-**MCP as the single source of truth** — Tools are registered once on the MCP server. No duplicate registries. Adding a tool means one `@mcp.tool()` decorator.
-
-**ReAct with fallback** — Agents use LLM reasoning to decide which tools to call. When the LLM can't produce valid JSON (common with phi3), the agent falls back to calling all its permitted tools. Worst case = same as hardcoded; best case = intelligent, selective tool use.
-
-**Fresh MCP connection per tool call** — The ReAct loop has slow LLM calls (10-30s) between tool calls. A long-lived SSE connection would timeout during these pauses. Each tool call opens its own short-lived MCP session (~50ms overhead, never times out).
-
-**Permission enforcement before MCP** — The permission check runs locally in `base.py` before the MCP request is made. Unauthorised calls never hit the wire. Every denial is logged.
-
-**Structured synthesis + LLM summary** — `synthesise()` formats raw data into a readable report using per-tool formatters. Then Ollama writes a conversational summary. If Ollama is down, the structured report is shown as-is.
-
-**Three-tier evaluation** — Validation checks (deterministic, CI), quality metrics (robustness/precision/recall, fast), and live AI evals (real LLM calls, measures reasoning quality). The tiers are designed so daily development uses fast evals, and thorough evaluation happens before releases.
+**Why database RBAC?** — A hardcoded dict is a demo. Database-backed roles with runtime management and audit logging is production thinking.
