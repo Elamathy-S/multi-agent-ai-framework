@@ -18,9 +18,9 @@ from server.models.rbac import Role, RolePermission, AccessAuditLog
 # Static fallback — used if DB hasn't been seeded or is unavailable
 _STATIC_PERMISSIONS = {
     "customer_agent": {"get_customer", "list_customers"},
-    "loan_agent":     {"get_loan_status", "get_credit_score"},
-    "risk_agent":     {"get_risk_score", "check_fraud"},
-    "trading_agent":  {"get_trading_portfolio", "get_pnl", "get_market_price"},
+    "loan_agent":     {"get_loan_status", "get_credit_score", "search_policies"},
+    "risk_agent":     {"get_risk_score", "check_fraud", "search_policies"},
+    "trading_agent":  {"get_trading_portfolio", "get_pnl", "get_market_price", "search_policies"},
 }
 
 
@@ -84,6 +84,24 @@ def check_permission(agent_name: str, tool_name: str, session_id: str = "", cust
     except Exception:
         # DB unavailable — fall back to static permissions
         return tool_name in _STATIC_PERMISSIONS.get(agent_name, set())
+
+
+def permitted_tools(agent_name: str) -> set[str]:
+    """
+    Tool names this role may use. Used to decide which tools an agent is
+    *shown*; it does not write to the audit log (check_permission does, on call).
+    """
+    try:
+        db = SessionLocal()
+        try:
+            role = db.query(Role).filter(Role.name == agent_name, Role.is_active == True).first()
+            if role:
+                return {p.tool_name for p in role.permissions}
+        finally:
+            db.close()
+    except Exception:
+        pass
+    return set(_STATIC_PERMISSIONS.get(agent_name, set()))
 
 
 # ---------------------------------------------------------------------------
@@ -273,15 +291,15 @@ def seed_default_roles():
             },
             "loan_agent": {
                 "description": "Assesses loans, credit scores, and approval decisions",
-                "tools": ["get_loan_status", "get_credit_score"],
+                "tools": ["get_loan_status", "get_credit_score", "search_policies"],
             },
             "risk_agent": {
                 "description": "Evaluates financial risk and detects fraud",
-                "tools": ["get_risk_score", "check_fraud"],
+                "tools": ["get_risk_score", "check_fraud", "search_policies"],
             },
             "trading_agent": {
                 "description": "Analyses portfolio holdings, PnL, and market data",
-                "tools": ["get_trading_portfolio", "get_pnl", "get_market_price"],
+                "tools": ["get_trading_portfolio", "get_pnl", "get_market_price", "search_policies"],
             },
         }
 

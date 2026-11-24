@@ -23,16 +23,13 @@ async function checkHealth() {
     const d = await r.json();
     setDot('api', true);
     setDot('mcp', d.mcp_server === 'ok');
-  } catch { setDot('api', false); setDot('mcp', false); }
-  try {
-    await fetch('http://localhost:11434', { signal: AbortSignal.timeout(2000), mode: 'no-cors' });
-    setDot('llm', true);
-  } catch { setDot('llm', false); }
+    setDot('llm', !!(d.llm && d.llm.configured));
+  } catch { setDot('api', false); setDot('mcp', false); setDot('llm', false); }
 }
 
 function setDot(id, on) {
   document.getElementById('dot-' + id).className = 'dot ' + (on ? 'on' : 'off');
-  const labels = { api: ['online','offline'], mcp: ['running','stopped'], llm: ['running','stopped'] };
+  const labels = { api: ['online','offline'], mcp: ['running','stopped'], llm: ['configured','not configured'] };
   document.getElementById('lbl-' + id).textContent = on ? labels[id][0] : labels[id][1];
 }
 

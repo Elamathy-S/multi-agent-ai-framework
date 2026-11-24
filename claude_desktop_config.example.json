@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "finance-mcp-server": {
+      "command": "python3",
+      "args": ["-m", "server.mcp_server"],
+      "cwd": "/absolute/path/to/multi-agent-ai-framework",
+      "env": {
+        "PYTHONPATH": ".",
+        "PYTHONUNBUFFERED": "1"
+      }
+    }
+  }
+}
