@@ -426,3 +426,11 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 .pnl-pct    { font-size: 10px; font-weight: 400; opacity: 0.8; }
 
 .pnl-total  { display: flex; align-items: center; padding: 0 2px; }
+/* Markdown in replies */
+.report p { margin: 0 0 8px; }
+.report ul { margin: 4px 0 10px 18px; padding: 0; }
+.report li { margin: 2px 0; }
+.report code { background: rgba(127,127,127,.15); padding: 1px 4px; border-radius: 3px; }
+.md-table { border-collapse: collapse; margin: 6px 0 10px; }
+.md-table th, .md-table td { border: 1px solid rgba(127,127,127,.35); padding: 4px 10px; text-align: left; }
+.md-table th { background: rgba(127,127,127,.12); }

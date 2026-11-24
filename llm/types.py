@@ -30,6 +30,9 @@ class ToolCall:
     id: str
     name: str
     args: dict
+    # Provider-specific data that must be echoed back verbatim on the next turn
+    # (e.g. Gemini's extra_content.google.thought_signature). Opaque to the agent loop.
+    extra: dict | None = None
 
 
 @dataclass

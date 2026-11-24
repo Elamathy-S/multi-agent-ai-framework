@@ -411,6 +411,36 @@ function esc(s) {
 }
 
 /**
+ * Minimal, safe Markdown renderer for model replies: **bold**, `code`, "- " bullets
+ * and | tables |. Input is HTML-escaped first, so model output can't inject markup.
+ */
+function renderMarkdown(text) {
+  const inline = t => esc(t).replace(/<br>/g, '')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>');
+  const lines = String(text).split('\n');
+  let html = '', i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (/^\s*\|.*\|\s*$/.test(line)) {                       // table block
+      const rows = [];
+      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) rows.push(lines[i++]);
+      const cells = r => r.trim().replace(/^\||\|$/g, '').split('|').map(c => c.trim());
+      const body = rows.filter(r => !/^\s*\|[\s:|-]+\|\s*$/.test(r));
+      html += '<table class="md-table">' + body.map((r, n) =>
+        '<tr>' + cells(r).map(c => `<${n ? 'td' : 'th'}>${inline(c)}</${n ? 'td' : 'th'}>`).join('') + '</tr>').join('') + '</table>';
+    } else if (/^\s*[-*]\s+/.test(line)) {                      // bullet list
+      html += '<ul>';
+      while (i < lines.length && /^\s*[-*]\s+/.test(lines[i]))
+        html += `<li>${inline(lines[i++].replace(/^\s*[-*]\s+/, ''))}</li>`;
+      html += '</ul>';
+    } else if (!line.trim()) { i++; }
+    else { html += `<p>${inline(line)}</p>`; i++; }
+  }
+  return html;
+}
+
+/**
  * Format a plain-text agent reply into HTML report sections.
  * Detects structured reports (emoji section headers) and renders
  * them as labeled key-value rows. Falls back to plain text.
@@ -420,7 +450,7 @@ function formatReport(text) {
 
   const isReport = /[👤🏦⚠️📈📌]\s+[A-Z]/.test(text);
   if (!isReport) {
-    return esc(text).replace(/\n/g, '<br>');
+    return renderMarkdown(text);
   }
 
   const sections = text.split(/\n\n+/);

@@ -52,7 +52,7 @@ Key files:
 | `client/agents/orchestrator.py` | Plan → delegate → synthesise |
 | `server/tools/analytics.py` | Deterministic risk, fraud and credit rules (mirrors the policy docs) |
 | `rag/` | Section-level chunking, Chroma + Ollama embeddings, in-memory TF-IDF fallback |
-| `client/security/` | Database-backed RBAC, audit log, admin guard |
+| `client/security/` | Database-backed RBAC (read-only API) and audit log |
 | `evals/` | Behavioural cases, graders, runner |
 
 ## Run it
@@ -60,7 +60,7 @@ Key files:
 ```bash
 python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env            # set ANTHROPIC_API_KEY (or LLM_PROVIDER=ollama)
+cp .env.example .env            # choose a model provider (see below) and add its key
 
 export PYTHONPATH=.
 python data/seed_data.py                                  # synthetic data
@@ -71,6 +71,15 @@ open frontend/index.html
 ```
 
 Docker: `docker compose up` (Anthropic) or `docker compose --profile local-llm up` (Ollama).
+
+**Model providers** (`LLM_PROVIDER` in `.env`):
+
+| Provider | Setting | Notes |
+|---|---|---|
+| Anthropic (default) | `anthropic` + `ANTHROPIC_API_KEY` | Native tool use |
+| Google Gemini | `gemini` + `GEMINI_API_KEY` | Free tier available; uses Google's OpenAI-compatible endpoint, retries rate limits, round-trips Gemini 3 thought signatures |
+| Any OpenAI-compatible API | `openai_compat` + `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` | Groq, OpenRouter, Mistral, ... |
+| Ollama (local) | `ollama` + `LLM_MODEL` | Free, runs on your machine |
 
 **Local models:** use one with tool calling (e.g. `qwen2.5:7b`, `llama3.1`). Models without it, such as
 phi3, cannot drive the agent loop and fail fast with a clear error.
