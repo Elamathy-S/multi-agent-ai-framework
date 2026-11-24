@@ -24,6 +24,15 @@ def _seed_roles():
     seed_default_roles()
 
 
+@pytest.fixture(autouse=True)
+def _clean_llm_env(monkeypatch):
+    """Tests must not depend on the developer's .env (provider, model, URL, token caps)."""
+    for v in ("LLM_PROVIDER", "LLM_MODEL", "LLM_BASE_URL", "LLM_API_KEY", "LLM_REASONING_EFFORT",
+              "LLM_MAX_OUTPUT_TOKENS", "LLM_MAX_CONCURRENCY", "LLM_TIMEOUT",
+              "GEMINI_API_KEY", "GOOGLE_API_KEY", "ANTHROPIC_API_KEY", "OLLAMA_HOST"):
+        monkeypatch.delenv(v, raising=False)
+
+
 class FakeMCP:
     """In-memory stand-in for MCPClient: same list_tools()/call() surface."""
 
