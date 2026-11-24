@@ -1,187 +1,145 @@
 """
-tests/test_orchestrator.py — Unit tests for the orchestrator.
-
-Tests plan_agents (query routing) and synthesise (output formatting).
-These run without Ollama or MCP — pure logic tests.
+tests/test_orchestrator.py — Supervisor planning, delegation and synthesis.
 """
 
 import pytest
-from client.agents.orchestrator import plan_agents, synthesise
+
+from client.agents.orchestrator import plan, orchestrator
+from llm import LLMError, LLMResponse, ToolCall
+from llm.scripted import RoutedScriptedLLM, ScriptedLLM, say, tool_call
 
 
-# ---------------------------------------------------------------------------
-# plan_agents — decides which agents handle a query
-# ---------------------------------------------------------------------------
-class TestPlanAgents:
-
-    def test_full_analysis_calls_all_agents(self):
-        agents = plan_agents("give me a full analysis of this customer")
-        assert set(agents) == {"customer", "loan", "risk", "trading"}
-
-    def test_overview_calls_all_agents(self):
-        agents = plan_agents("complete overview please")
-        assert set(agents) == {"customer", "loan", "risk", "trading"}
-
-    def test_risk_query_includes_risk(self):
-        agents = plan_agents("what is the risk level")
-        assert "risk" in agents
-
-    def test_fraud_query_includes_risk(self):
-        agents = plan_agents("is there any fraud")
-        assert "risk" in agents
-
-    def test_loan_query_includes_loan(self):
-        agents = plan_agents("check loan status")
-        assert "loan" in agents
-
-    def test_credit_query_includes_loan(self):
-        agents = plan_agents("what is the credit score")
-        assert "loan" in agents
-
-    def test_portfolio_query_includes_trading(self):
-        agents = plan_agents("show me the portfolio")
-        assert "trading" in agents
-
-    def test_profit_query_includes_trading(self):
-        agents = plan_agents("how much profit has been made")
-        assert "trading" in agents
-
-    def test_customer_query_includes_customer(self):
-        agents = plan_agents("who is this customer")
-        assert "customer" in agents
-
-    def test_multi_topic_query(self):
-        agents = plan_agents("check the loan and risk for this customer")
-        assert "loan" in agents
-        assert "risk" in agents
-
-    def test_unknown_query_defaults_to_customer(self):
-        agents = plan_agents("xyzzy")
-        assert "customer" in agents
+def delegate(*tasks, reasoning="because") -> LLMResponse:
+    return LLMResponse(
+        tool_calls=[ToolCall("p", "delegate", {"reasoning": reasoning, "tasks": [
+            {"agent": a, "task": t} for a, t in tasks]})],
+        stop_reason="tool_use",
+    )
 
 
-# ---------------------------------------------------------------------------
-# synthesise — formats agent results into readable output
-# ---------------------------------------------------------------------------
-class TestSynthesise:
+class TestPlanning:
 
-    def test_empty_results(self):
-        result = synthesise("test", {})
-        assert "no data" in result.lower()
+    async def test_supervisor_delegates_with_task_per_specialist(self):
+        llm = ScriptedLLM([delegate(("risk", "assess risk"), ("loan", "credit score"))])
+        p = await plan(llm, "risk and credit?", 1)
+        assert p.agents == ["risk", "loan"]
+        assert p.tasks[0]["task"] == "assess risk"
 
-    def test_customer_section(self, sample_customer):
-        agent_results = {
-            "customer": {
-                "observations": {"get_customer": sample_customer},
-            }
-        }
-        result = synthesise("who is customer 1", agent_results)
-        assert "Alice" in result
-        assert "alice@example.com" in result
+    async def test_planner_is_given_the_roster_and_the_delegate_tool(self):
+        llm = ScriptedLLM([delegate(("risk", "x"))])
+        await plan(llm, "q", 3)
+        req = llm.requests[0]
+        assert req["tools"] == ["delegate"]
+        assert all(name in req["system"] for name in ("customer", "loan", "risk", "trading"))
+        assert "Customer ID: 3" in req["messages"][0]["content"]
 
-    def test_risk_section(self, sample_risk, sample_fraud_clear):
-        agent_results = {
-            "risk": {
-                "observations": {
-                    "get_risk_score": sample_risk,
-                    "check_fraud":    sample_fraud_clear,
-                },
-            }
-        }
-        result = synthesise("check risk", agent_results)
-        assert "35" in result           # risk score
-        assert "LOW" in result          # risk level
-        assert "Clear" in result        # no fraud
+    async def test_unknown_agents_and_duplicates_are_dropped(self):
+        llm = ScriptedLLM([delegate(("risk", "a"), ("wizard", "b"), ("risk", "c"))])
+        p = await plan(llm, "q", 1)
+        assert p.agents == ["risk"]
 
-    def test_fraud_flagged_shows_warning(self, sample_risk, sample_fraud_flagged):
-        agent_results = {
-            "risk": {
-                "observations": {
-                    "get_risk_score": sample_risk,
-                    "check_fraud":    sample_fraud_flagged,
-                },
-            }
-        }
-        result = synthesise("check fraud", agent_results)
-        assert "FLAGGED" in result
+    async def test_out_of_scope_question_gets_a_direct_reply(self):
+        p = await plan(ScriptedLLM([say("I only help with customer finance.")]), "tell me a joke", 1)
+        assert p.tasks == [] and p.direct_reply.startswith("I only help")
 
-    def test_loan_section(self, sample_credit, sample_loans):
-        agent_results = {
-            "loan": {
-                "observations": {
-                    "get_credit_score": sample_credit,
-                    "get_loan_status":  sample_loans,
-                },
-            }
-        }
-        result = synthesise("loan check", agent_results)
-        assert "720" in result          # credit score
-        assert "Good" in result         # rating
-        assert "2" in result            # number of loans
-        assert "$15,000" in result      # total amount
+    async def test_no_plan_and_no_text_fails_loudly(self):
+        with pytest.raises(LLMError):
+            await plan(ScriptedLLM([LLMResponse()]), "q", 1)
 
-    def test_trading_section(self, sample_portfolio, sample_pnl):
-        agent_results = {
-            "trading": {
-                "observations": {
-                    "get_trading_portfolio": sample_portfolio,
-                    "get_pnl":              sample_pnl,
-                },
-            }
-        }
-        result = synthesise("portfolio check", agent_results)
-        assert "AAPL" in result
-        assert "TSLA" in result
-        assert "1,250.50" in result     # total PnL
 
-    def test_multi_agent_result(self, sample_customer, sample_risk, sample_fraud_clear):
-        agent_results = {
-            "customer": {
-                "observations": {"get_customer": sample_customer},
-            },
-            "risk": {
-                "observations": {
-                    "get_risk_score": sample_risk,
-                    "check_fraud":    sample_fraud_clear,
-                },
-            },
-        }
-        result = synthesise("full analysis", agent_results)
-        assert "Alice" in result        # customer section
-        assert "35" in result           # risk section
-        assert "Clear" in result        # fraud section
+class TestRun:
 
-    def test_handles_error_observations(self):
-        agent_results = {
-            "risk": {
-                "observations": {
-                    "get_risk_score": {"error": "Permission denied"},
-                },
-            }
-        }
-        result = synthesise("check risk", agent_results)
-        assert "Permission denied" in result
+    def llm(self, **agents):
+        return RoutedScriptedLLM(
+            supervisor=[delegate(*[(a, f"{a} task") for a in agents])],
+            agents=agents,
+            synthesis=[say("Final combined answer.")],
+        )
 
-    def test_handles_unknown_tool_gracefully(self):
-        """New tools that don't have a formatter should not crash."""
-        agent_results = {
-            "customer": {
-                "observations": {
-                    "some_future_tool": {"foo": "bar", "count": 42},
-                },
-            }
-        }
-        result = synthesise("test", agent_results)
-        assert "foo" in result
-        assert "42" in result
+    async def test_runs_only_the_delegated_specialists(self, fake_mcp):
+        llm = self.llm(risk=[tool_call("get_risk_score"), say("Risk MEDIUM 62")])
+        out = await orchestrator("how risky?", 1, llm=llm, mcp=fake_mcp)
+        assert out["agents_called"] == ["risk"]
+        assert [c[0] for c in fake_mcp.calls] == ["get_risk_score"]
+        assert out["answer"] == "Final combined answer."
 
-    def test_empty_loans_shows_none_on_record(self):
-        agent_results = {
-            "loan": {
-                "observations": {
-                    "get_loan_status": [],
-                },
-            }
-        }
-        result = synthesise("loan check", agent_results)
-        assert "None" in result or "No" in result.lower()
+    async def test_specialists_run_independently_with_their_own_tools(self, fake_mcp):
+        llm = self.llm(
+            risk=[tool_call("get_risk_score"), say("Risk MEDIUM")],
+            loan=[tool_call("get_credit_score"), say("Credit 640")],
+        )
+        out = await orchestrator("full view", 1, llm=llm, mcp=fake_mcp)
+        assert set(out["agent_results"]) == {"risk", "loan"}
+        assert {c[0] for c in fake_mcp.calls} == {"get_risk_score", "get_credit_score"}
+
+    async def test_synthesis_is_grounded_in_specialist_findings(self, fake_mcp):
+        llm = self.llm(risk=[tool_call("get_risk_score"), say("Risk MEDIUM (62)")])
+        await orchestrator("how risky?", 1, llm=llm, mcp=fake_mcp)
+        synth_input = [r for r in llm.requests if r["who"] == "synthesis"][0]
+        text = synth_input["messages"][0]["content"]
+        assert "Risk MEDIUM (62)" in text and '"risk_score": 62' in text
+        assert "ONLY the specialist reports" in synth_input["system"]
+
+    async def test_one_failing_specialist_does_not_sink_the_run(self, fake_mcp):
+        llm = RoutedScriptedLLM(
+            supervisor=[delegate(("risk", "r"), ("loan", "l"))],
+            agents={"loan": [say("Credit 640")]},       # risk has no script -> raises LLMError
+            synthesis=[say("Partial answer.")],
+        )
+        out = await orchestrator("both", 1, llm=llm, mcp=fake_mcp)
+        assert out["agent_results"]["risk"]["status"] == "error"
+        assert out["agent_results"]["loan"]["status"] == "ok"
+        synth = [r for r in llm.requests if r["who"] == "synthesis"][0]["messages"][0]["content"]
+        assert "FAILED" in synth
+
+    async def test_all_specialists_failing_skips_synthesis(self, fake_mcp):
+        llm = RoutedScriptedLLM(supervisor=[delegate(("risk", "r"))], agents={})
+        out = await orchestrator("q", 1, llm=llm, mcp=fake_mcp)
+        assert out["answer"].startswith("I could not complete")
+        assert not [r for r in llm.requests if r["who"] == "synthesis"]
+
+    async def test_direct_reply_skips_all_agents(self, fake_mcp):
+        out = await orchestrator("joke?", 1, llm=ScriptedLLM([say("Out of scope.")]), mcp=fake_mcp)
+        assert out["answer"] == "Out of scope." and out["agents_called"] == [] and fake_mcp.calls == []
+
+    async def test_permission_denials_are_surfaced(self, fake_mcp):
+        llm = self.llm(risk=[tool_call("get_customer"), say("Could not read profile")])
+        out = await orchestrator("who?", 1, llm=llm, mcp=fake_mcp)
+        assert out["denials"][0]["tool"] == "get_customer"
+
+
+class TestCitationGuard:
+    """Regression: a weak model invented '[risk_policy_001#2]' that no agent had retrieved."""
+
+    async def test_invented_citation_is_removed_and_flagged(self, fake_mcp):
+        llm = RoutedScriptedLLM(
+            supervisor=[delegate(("risk", "r"))],
+            agents={"risk": [tool_call("search_policies", query="bands"), say("Medium risk [risk_policy_001#1]")]},
+            synthesis=[say("Medium [risk_policy_001#1]. Must assess within 30 days [risk_policy_001#2].")],
+        )
+        out = await orchestrator("q", 1, llm=llm, mcp=fake_mcp)
+        assert "[risk_policy_001#1]" in out["answer"]                 # really retrieved: kept
+        assert "[risk_policy_001#2]" not in out["answer"]             # never retrieved: removed
+        assert out["removed_citations"] == ["risk_policy_001#2"]
+
+    async def test_failed_specialist_keeps_its_partial_trace_and_error(self, fake_mcp):
+        llm = RoutedScriptedLLM(
+            supervisor=[delegate(("risk", "r"))],
+            agents={"risk": [tool_call("get_risk_score")]},           # then the model dies
+            synthesis=[],
+        )
+        out = await orchestrator("q", 1, llm=llm, mcp=fake_mcp)
+        risk = out["agent_results"]["risk"]
+        assert risk["status"] == "error" and "No scripted response" in risk["error"]
+        assert [s["action"] for s in risk["steps"]] == ["get_risk_score"]
+
+    async def test_synthesis_is_told_which_passages_were_retrieved(self, fake_mcp):
+        llm = RoutedScriptedLLM(
+            supervisor=[delegate(("risk", "r"))],
+            agents={"risk": [tool_call("search_policies", query="x"), say("ok")]},
+            synthesis=[say("done")],
+        )
+        await orchestrator("q", 1, llm=llm, mcp=fake_mcp)
+        synth = [r for r in llm.requests if r["who"] == "synthesis"][0]
+        assert "Policy passages retrieved: risk_policy_001#1" in synth["messages"][0]["content"]
+        assert "Never write a policy rule from memory" in synth["system"]

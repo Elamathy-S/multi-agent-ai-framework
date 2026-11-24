@@ -2,7 +2,7 @@
 server/tools/customer_context_builder.py
 
 Pulls a customer's loans, accounts, and recent transactions from the DB
-and returns a structured dict that gets passed to the LLM as context.
+and returns a structured dict consumed by server/tools/analytics.py.
 """
 
 from server.db import SessionLocal
@@ -14,8 +14,7 @@ from server.models.accounts import Account
 def build_customer_context(customer_id: int) -> dict:
     """
     Build a financial context dict for a customer.
-    Used by credit_score_tool and any other tool that needs real data
-    before calling the LLM.
+    Input for the deterministic analytics in server/tools/analytics.py.
     """
     db = SessionLocal()
 
@@ -29,7 +28,8 @@ def build_customer_context(customer_id: int) -> dict:
             transactions = (
                 db.query(Transaction)
                 .filter(Transaction.account_id.in_(account_ids))
-                .limit(20)   # cap for token safety
+                .order_by(Transaction.timestamp.desc())
+                .limit(500)
                 .all()
             )
 
@@ -51,11 +51,13 @@ def build_customer_context(customer_id: int) -> dict:
                 }
                 for a in accounts
             ],
-            "transactions_sample": [
+            "transactions": [
                 {
+                    "account_id":  t.account_id,
                     "amount":      float(t.amount),
                     "type":        t.type,
                     "description": t.description,
+                    "timestamp":   t.timestamp,
                 }
                 for t in transactions
             ],

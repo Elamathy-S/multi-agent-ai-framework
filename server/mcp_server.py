@@ -96,17 +96,17 @@ def get_loan_status(customer_id: int) -> str:
 @mcp.tool()
 def get_credit_score(customer_id: int) -> str:
     """
-    Calculate a credit score for a customer based on their financial history.
-
-    Analyses loans, account balances, and transactions to produce a score
-    between 300 (Poor) and 850 (Excellent), plus loan approval likelihood.
+    Compute a deterministic credit score (300-850) from balances, open loan
+    debt, rejected applications and cash flow.
 
     Args:
         customer_id: The unique integer ID of the customer.
 
     Returns:
         JSON with credit_score, rating (Poor/Fair/Good/Excellent),
-        risk_factors, positive_factors, and loan_approval_likelihood.
+        loan_approval_likelihood, the scoring factors, and the raw metrics.
+        Whether a loan is actually approved is decided by loan policy
+        (see search_policies), not by this score alone.
     """
     result = credit_score_tool(customer_id)
     return json.dumps(result, indent=2)
@@ -118,15 +118,18 @@ def get_credit_score(customer_id: int) -> str:
 @mcp.tool()
 def get_risk_score(customer_id: int) -> str:
     """
-    Compute an overall financial risk score for a customer (0–100 scale).
+    Compute a deterministic financial risk score (0-100) for a customer.
 
-    A score under 30 = LOW risk, 30–70 = MEDIUM, above 70 = HIGH.
+    Bands follow the risk policy: 0-25 LOW, 26-50 LOW-MEDIUM, 51-70 MEDIUM,
+    71-85 HIGH, 86-100 CRITICAL.
 
     Args:
         customer_id: The unique integer ID of the customer.
 
     Returns:
-        JSON with risk_score and level (LOW / MEDIUM / HIGH).
+        JSON with risk_score, level, per-component points, and raw metrics.
+        Required follow-up actions for a band are defined in policy
+        (see search_policies).
     """
     result = risk_score_tool(customer_id)
     return json.dumps(result, indent=2)
@@ -138,15 +141,17 @@ def get_risk_score(customer_id: int) -> str:
 @mcp.tool()
 def check_fraud(customer_id: int) -> str:
     """
-    Run a fraud detection check on a customer's recent transactions.
+    Run rule-based fraud screening over a customer's recent transactions.
 
-    Flags unusual patterns that may indicate fraudulent activity.
+    Rules: amount over 3x the customer's average, more than 5 transactions
+    in one hour, and transactions over $1,000 between 02:00 and 05:00.
 
     Args:
         customer_id: The unique integer ID of the customer.
 
     Returns:
-        JSON with fraud_flag (true/false) and a plain-English reason.
+        JSON with fraud_flag, severity (NONE/LOW/HIGH), the matched
+        suspicious_patterns, and the rules that were checked.
     """
     result = fraud_check_tool(customer_id)
     return json.dumps(result, indent=2)
@@ -193,43 +198,7 @@ def get_pnl(customer_id: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# TOOL 8 — Full Customer Analysis (composite tool)
-# ---------------------------------------------------------------------------
-@mcp.tool()
-def full_customer_analysis(customer_id: int) -> str:
-    """
-    Run a complete financial analysis for a customer in one call.
-
-    Combines profile, credit score, risk score, fraud check, and PnL into a
-    single structured report. Useful for advisor dashboards or AI summaries.
-
-    Args:
-        customer_id: The unique integer ID of the customer.
-
-    Returns:
-        JSON report with all analysis sections bundled together.
-    """
-    profile  = get_customer_profile(customer_id)
-    credit   = credit_score_tool(customer_id)
-    risk     = risk_score_tool(customer_id)
-    fraud    = fraud_check_tool(customer_id)
-    loans    = check_loan_status(customer_id)
-    pnl      = calculate_pnl(customer_id)
-
-    report = {
-        "customer_id": customer_id,
-        "profile":     profile,
-        "credit":      credit,
-        "risk":        risk,
-        "fraud":       fraud,
-        "loans":       loans,
-        "portfolio_pnl": pnl,
-    }
-    return json.dumps(report, indent=2)
-
-
-# ---------------------------------------------------------------------------
-# TOOL 9 — List all customers (discovery helper)
+# TOOL 8 — List all customers (discovery helper)
 # ---------------------------------------------------------------------------
 @mcp.tool()
 def list_customers(limit: int = 10) -> str:
@@ -258,7 +227,7 @@ def list_customers(limit: int = 10) -> str:
 
 
 # ---------------------------------------------------------------------------
-# TOOL 10 — Market prices
+# TOOL 9 — Market prices
 # ---------------------------------------------------------------------------
 @mcp.tool()
 def get_market_price(symbol: str) -> str:
@@ -290,6 +259,34 @@ def get_market_price(symbol: str) -> str:
         }, indent=2)
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# TOOL 10 — Policy search (RAG)
+# ---------------------------------------------------------------------------
+@mcp.tool()
+def search_policies(query: str, category: str = "", n: int = 3) -> str:
+    """
+    Search the company policy knowledge base (loan, risk, fraud, trading,
+    compliance). Use this to find thresholds, required actions and
+    escalation rules BEFORE recommending any action to a customer.
+
+    Args:
+        query:    What you need to know, e.g. "actions for high risk customers".
+        category: Optional filter: loan, risk, fraud, trading or compliance.
+        n:        Number of passages to return (default 3, max 6).
+
+    Returns:
+        JSON list of passages: id, title, category, score (0-1), text.
+        Cite the passage id when relying on one.
+    """
+    from rag.embedder import retrieve
+    passages = retrieve(query, n_results=min(max(n, 1), 6), category=category or None)
+    return json.dumps(
+        [{"id": p["id"], "title": p["title"], "category": p["category"],
+          "score": p["score"], "text": p["content"].strip()} for p in passages],
+        indent=2,
+    )
 
 
 # ===========================================================================

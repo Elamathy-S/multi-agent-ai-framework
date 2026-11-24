@@ -7,7 +7,8 @@ All tool execution now goes through the MCP server via the MCP client.
 
 import os
 import json
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from client.security.admin import require_admin
 from client.mcp.client import MCPClient, MCPConnectionError
 from client.agents.orchestrator import orchestrator
 
@@ -123,9 +124,9 @@ async def mcp_surface():
 
 
 # ---------------------------------------------------------------------------
-# 5. EXECUTE TOOL — now goes through MCP (not the local registry)
+# 5. EXECUTE TOOL — admin only: calls a tool directly, bypassing agent RBAC
 # ---------------------------------------------------------------------------
-@router.post("/tools/execute")
+@router.post("/tools/execute", dependencies=[Depends(require_admin)])
 async def execute_tool_endpoint(payload: dict):
     """
     Execute a tool by name via the MCP server.
@@ -151,8 +152,8 @@ async def execute_tool_endpoint(payload: dict):
 # 6. RUN AGENT — now uses the async orchestrator (MCP-powered)
 # ---------------------------------------------------------------------------
 @router.post("/agents/run")
-async def run_agent(payload: dict):
-    """Route a natural language query through the MCP-powered orchestrator."""
+async def run_agents_endpoint(payload: dict):
+    """Run the supervisor + specialists on a natural-language query."""
     query       = payload.get("query", "")
     customer_id = payload.get("customer_id", 1)
 

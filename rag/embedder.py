@@ -9,22 +9,23 @@ Pipeline
                  nearest documents (optionally filtered by category), and results
                  below a relevance threshold are dropped.
     fallback   : if Ollama embeddings or ChromaDB are unavailable at query time,
-                 retrieval falls back to the TF-IDF index so agents still get
-                 policy context.
+                 retrieval falls back to an in-memory TF-IDF index (built on
+                 first use, nothing is persisted) so agents still get context.
+    chunking   : documents are split into sections (rag/chunking.py); each
+                 section is one retrievable passage.
 
 Pull the embedding model once:
     ollama pull nomic-embed-text
 """
 
 import os
-import pickle
+import re
 import requests
 import numpy as np
 from pathlib import Path
 
 BASE_DIR   = Path(__file__).parent
 CHROMA_DIR = Path(os.getenv("RAG_CHROMA_DIR", BASE_DIR / "chroma_db"))
-INDEX_FILE = BASE_DIR / "tfidf_index.pkl"          # TF-IDF fallback index
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 
@@ -59,28 +60,31 @@ def _cosine_similarity(a: list, b: list) -> float:
 
 
 # ── TF-IDF fallback ───────────────────────────────────────────────────────
+def _tokens(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9$]+", text.lower())
+
+
 def _tfidf_index(documents: list[dict]) -> dict:
     """Build a simple TF-IDF index — no model download needed."""
     import math
     from collections import Counter
 
-    corpus = [f"{d['title']} {d['content']}".lower() for d in documents]
+    corpus = [_tokens(f"{d['title']} {d['content']}") for d in documents]
 
     # Term frequency per document
     tf = []
-    for doc in corpus:
-        words = doc.split()
+    for words in corpus:
         counts = Counter(words)
         total  = len(words)
         tf.append({w: c / total for w, c in counts.items()})
 
     # Inverse document frequency
-    all_words = set(w for doc in corpus for w in doc.split())
+    all_words = set(w for doc in corpus for w in doc)
     idf = {}
     N = len(corpus)
     for word in all_words:
         df = sum(1 for doc in corpus if word in doc)
-        idf[word] = math.log(N / (1 + df))
+        idf[word] = math.log(1 + N / df)
 
     # TF-IDF vectors
     vectors = []
@@ -97,7 +101,9 @@ def _tfidf_query(index: dict, query: str, n: int) -> list[dict]:
     import math
     from collections import Counter
 
-    words = query.lower().split()
+    words = _tokens(query)
+    if not words:
+        return []
     counts = Counter(words)
     total  = len(words)
     all_words = set(index["all_words"])
@@ -152,16 +158,18 @@ def _chroma_count() -> int:
         return 0
 
 
-# ── TF-IDF fallback index (pickle) ────────────────────────────────────────
+# ── TF-IDF fallback index (in memory) ───────────────────────────────────────────────────────────────────────────
 _index = None
 _category_cache: dict[str, dict] = {}  # category → cached TF-IDF index
 
 
 def _load_index():
+    """Build the TF-IDF index in memory on first use (the corpus is small)."""
     global _index
-    if _index is None and INDEX_FILE.exists():
-        with open(INDEX_FILE, "rb") as f:
-            _index = pickle.load(f)
+    if _index is None:
+        from rag.chunking import chunk_documents
+        from rag.documents import DOCUMENTS
+        _index = _tfidf_index(chunk_documents(DOCUMENTS))
     return _index
 
 
@@ -181,43 +189,40 @@ def _tfidf_retrieve(query: str, n_results: int, category: str | None) -> list[di
 
 # ── Public API ────────────────────────────────────────────────────────────
 def build_index(documents: list[dict], force: bool = False) -> int:
-    """Build the ChromaDB collection (and the TF-IDF fallback index)."""
+    """Chunk the documents and build the ChromaDB collection from them."""
     global _index
-    _category_cache.clear()
+    from rag.chunking import chunk_documents
 
-    if not force and INDEX_FILE.exists() and _chroma_count() == len(documents):
-        print(f"Index up to date — {len(documents)} documents already indexed.")
+    _category_cache.clear()
+    chunks = chunk_documents(documents)
+    _index = _tfidf_index(chunks)          # keep the in-memory fallback fresh
+
+    if not force and _chroma_count() == len(chunks):
+        print(f"Index up to date — {len(chunks)} chunks already indexed.")
         return 0
 
-    print(f"Building index for {len(documents)} documents...")
+    print(f"Building index: {len(documents)} documents -> {len(chunks)} chunks...")
+    documents = chunks
 
-    # 1) TF-IDF fallback index — cheap, fully offline, always built
-    _index = _tfidf_index(documents)
-    _index["type"] = "tfidf"
-    with open(INDEX_FILE, "wb") as f:
-        pickle.dump(_index, f)
-    print(f"✅ TF-IDF fallback index saved to {INDEX_FILE}")
-
-    # 2) ChromaDB index with Ollama embeddings
     texts = [f"{d['title']}\n{d['content'].strip()}" for d in documents]
     embeddings = _ollama_embed(texts)
     if not embeddings:
         # Drop any stale collection so retrieval uses the fresh TF-IDF index
         # instead of serving outdated vectors.
         _get_collection(reset=True)
-        print("⚠️  Ollama embeddings unavailable — only the TF-IDF fallback was built")
+        print("⚠️  Ollama embeddings unavailable — retrieval will use TF-IDF only")
         return len(documents)
 
     col = _get_collection(reset=True)
     if col is None:
-        print("⚠️  chromadb unavailable — only the TF-IDF fallback was built")
+        print("⚠️  chromadb unavailable — retrieval will use TF-IDF only")
         return len(documents)
 
     col.add(
         ids=[d["id"] for d in documents],
         embeddings=embeddings,
         documents=[d["content"].strip() for d in documents],
-        metadatas=[{"category": d.get("category", ""), "title": d["title"]} for d in documents],
+        metadatas=[{"category": d.get("category", ""), "title": d["title"], "doc_id": d["doc_id"]} for d in documents],
     )
     print(f"✅ ChromaDB collection '{COLLECTION_NAME}' built with {EMBED_MODEL}")
     print(f"   Location:  {CHROMA_DIR}")

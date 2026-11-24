@@ -5,11 +5,11 @@ Run this once after installing dependencies, and again whenever
 you add new documents to rag/documents.py.
 
 Usage:
-    cd "Masters Project/MCP "
-    PYTHONPATH=. python3.12 rag/build_index.py
+    PYTHONPATH=. python3 rag/build_index.py          # build / refresh
+    PYTHONPATH=. python3 rag/build_index.py --force  # full rebuild
 
-    # Force full rebuild:
-    PYTHONPATH=. python3.12 rag/build_index.py --force
+The vector index is a build artifact (git-ignored). Without it, retrieval
+falls back to an in-memory TF-IDF index, so search still works.
 """
 
 import sys
@@ -45,7 +45,7 @@ def main():
         print(f"❌ Missing dependency: {e}")
         print()
         print("Install with:")
-        print("  pip install chromadb sentence-transformers")
+        print("  pip install chromadb")
         sys.exit(1)
 
 if __name__ == "__main__":

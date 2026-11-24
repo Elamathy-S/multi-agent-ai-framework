@@ -1,168 +1,115 @@
-# Multi-Agent AI Framework
+# Multi-Agent Finance Assistant
 
 ![CI](https://github.com/Elamathy-S/multi-agent-ai-framework/actions/workflows/ci.yml/badge.svg)
 
-A multi-agent system where AI agents handle financial tasks — risk assessment, fraud detection, credit scoring, portfolio analysis — and talk to each other through the Model Context Protocol (MCP). Each agent reasons independently, decides which tools to use, and can only access data it's authorised for.
+A supervisor LLM and four specialist agents answer questions about a bank customer. The agents decide
+for themselves which tools to call, read policy through retrieval, and are constrained by role-based
+access control. Tools are served over the Model Context Protocol (MCP).
 
-Built as a Masters project to explore how agentic AI systems work at the protocol level.
+> Data is synthetic (Faker). This is a learning/portfolio project, not a production banking system.
 
-## What it does
+## What makes this an agent system (and not a pipeline)
 
-You ask a question like "give me a full analysis of customer 3" and the system:
-
-1. Figures out which agents need to run (customer, loan, risk, trading)
-2. Runs them at the same time
-3. Each agent thinks about what tools to call, calls them through MCP, looks at the results, and decides what to do next
-4. Combines everything into a report
-5. The frontend shows the whole reasoning process live as it happens
-
-Every tool call goes through the MCP protocol (JSON-RPC 2.0 over SSE) — agents don't call Python functions directly. The same MCP server works with Claude Desktop.
+| Concern | How it works here |
+|---|---|
+| **Who decides which tools run?** | The model. Each specialist gets a task and a set of tools and chooses calls using native tool-use (Anthropic tool use / Ollama tools). There is no keyword router and no fixed call order. |
+| **Who decides which specialists run?** | A supervisor LLM calls a `delegate` tool with a self-contained sub-task per specialist. Out-of-scope questions are declined without touching any tool. |
+| **Where does reasoning happen?** | In the agents. Tools (`get_risk_score`, `check_fraud`, `get_credit_score`) are **deterministic** computations (`server/tools/analytics.py`), not hidden LLM calls. The agent interprets the numbers against policy. |
+| **How is RAG used?** | `search_policies` is an MCP tool. The agent chooses when to retrieve, and must cite passage ids like `[risk_policy_002#1]`. Evals check the citations are real. |
+| **What stops the model misbehaving?** | The harness, not the prompt: agents only *see* tools their RBAC role allows; every call is re-checked and audit-logged; `customer_id` is injected by the harness so the model cannot read another customer; tool output is size-capped. |
+| **How do you know it works?** | Behavioural evals (`evals/`) grade real runs on tool selection, delegation, policy citation, numeric grounding, efficiency and scope. The graders themselves are unit-tested. |
 
 ## Architecture
 
 ```
-Frontend (HTML/JS)
-    │
-    ▼ SSE stream
-FastAPI Server (:8080)
-    │
-    ├── Orchestrator ── picks agents, runs them concurrently
-    │       │
-    │       ├── Customer Agent ── profiles
-    │       ├── Loan Agent ────── loans, credit scores
-    │       ├── Risk Agent ────── risk scoring, fraud detection
-    │       └── Trading Agent ─── portfolio, PnL
-    │               │
-    │               ▼
-    │       ReAct Loop (think → act → observe → repeat)
-    │               │
-    │               ▼ permission check (RBAC)
-    │
-    ▼ JSON-RPC 2.0 over SSE
-MCP Server (:8001)
-    │
-    ├── 10 tools, 4 resources, 4 prompts
-    │
-    ├── SQLite (customer, loan, trade data)
-    └── RAG (policy documents via ChromaDB + TF-IDF)
+Browser ──SSE──▶ FastAPI (:8080)
+                   │
+                   ▼
+            Supervisor (LLM)  ── plan ──▶ delegate(tasks)
+                   │
+        ┌──────────┼───────────┬───────────┐   run concurrently
+        ▼          ▼           ▼           ▼
+    customer     loan        risk       trading        each = the same agent loop:
+        └──────────┴─────┬─────┴───────────┘            model ⇄ tools until it answers
+                         │  RBAC filter + audit
+                         ▼
+                 MCP server (:8001, JSON-RPC over SSE)
+                   ├─ 10 tools: lookups, deterministic scoring, search_policies (RAG)
+                   ├─ resources + prompts (usable from Claude Desktop)
+                   └─ SQLite/Postgres, Chroma/TF-IDF
+                         ▲
+                         │
+            Supervisor (LLM) synthesises the specialists' findings
 ```
 
-## Key features
+Key files:
 
-**MCP protocol** — agents communicate through JSON-RPC 2.0, not function calls. Add a new tool with one `@mcp.tool()` decorator and every agent can discover it.
+| Path | Role |
+|---|---|
+| `llm/` | Provider-neutral LLM interface: Anthropic (default), Ollama, scripted (tests) |
+| `client/agents/loop.py` | The agent loop and the guarantees the harness enforces |
+| `client/agents/specs.py` | Specialists as data (name, RBAC role, domain guidance) |
+| `client/agents/orchestrator.py` | Plan → delegate → synthesise |
+| `server/tools/analytics.py` | Deterministic risk, fraud and credit rules (mirrors the policy docs) |
+| `rag/` | Section-level chunking, Chroma + Ollama embeddings, in-memory TF-IDF fallback |
+| `client/security/` | Database-backed RBAC, audit log, admin guard |
+| `evals/` | Behavioural cases, graders, runner |
 
-**ReAct reasoning** — agents use a think-act-observe loop where the LLM decides what to do next. If the LLM can't reason properly (happens ~67% of the time with phi3), it falls back to calling all its tools — so data is always correct.
+## Run it
 
-**RBAC** — database-backed role-based access control. Each agent has a role with scoped permissions. The risk agent can't read customer profiles. Permissions can be changed at runtime through the API. Every access check is logged to an audit trail.
-
-**RAG** — agents retrieve relevant policy documents (loan approval rules, risk thresholds) before reasoning, so decisions are grounded in domain knowledge.
-
-**Live trace** — the frontend streams every step as it happens: which agents were selected, what each agent is thinking, which tools are being called, what data came back.
-
-## Tech stack
-
-Python, FastAPI, MCP v2, Ollama (phi3), SQLAlchemy, SQLite, ChromaDB, Docker, GitHub Actions, pytest
-
-## Quick start
-
-**With Docker:**
 ```bash
-git clone https://github.com/Elamathy-S/multi-agent-ai-framework.git
-cd multi-agent-ai-framework
-docker-compose up
-```
-
-**Without Docker:**
-```bash
-git clone https://github.com/Elamathy-S/multi-agent-ai-framework.git
-cd multi-agent-ai-framework
-python3 -m venv venv && source venv/bin/activate
+python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
+cp .env.example .env            # set ANTHROPIC_API_KEY (or LLM_PROVIDER=ollama)
 
-ollama serve && ollama pull phi3
-
-# Terminal 1 — MCP server
-PYTHONPATH=. python3 -m server.mcp_server --http --port 8001
-
-# Terminal 2 — Client server
-PYTHONPATH=. uvicorn client.main:app --reload --port 8080
+export PYTHONPATH=.
+python data/seed_data.py                                  # synthetic data
+python rag/build_index.py                                 # optional: semantic index (needs Ollama embeddings)
+python -m server.mcp_server --http --port 8001            # terminal 1
+uvicorn client.main:app --port 8080                       # terminal 2
+open frontend/index.html
 ```
 
-Open `frontend/index.html` and try "full analysis of customer 3".
+Docker: `docker compose up` (Anthropic) or `docker compose --profile local-llm up` (Ollama).
 
-## API highlights
+**Local models:** use one with tool calling (e.g. `qwen2.5:7b`, `llama3.1`). Models without it, such as
+phi3, cannot drive the agent loop and fail fast with a clear error.
 
-| Endpoint | What it does |
-|----------|-------------|
-| `GET /agent/react/stream` | Full multi-agent run with live SSE trace |
-| `POST /chat` | Single tool call, keyword-routed |
-| `GET /mcp/surface` | See all MCP tools, resources, prompts |
-| `GET /security/roles` | View RBAC roles and permissions |
-| `POST /security/roles/{name}/grant` | Grant a tool to a role at runtime |
-| `GET /security/audit` | View access audit log |
-| `GET /docs` | Swagger UI |
+Try: *"How risky is this customer and what does policy require?"*, *"Could they get a $30,000 loan?"*,
+*"Give me a full review."*
 
-## RBAC
-
-Roles and permissions are stored in the database, not hardcoded. You can manage them at runtime:
+## Testing and evals
 
 ```bash
-# See all roles
-curl http://localhost:8080/security/roles
-
-# Create a new role
-curl -X POST http://localhost:8080/security/roles \
-  -d '{"name": "audit_agent", "description": "Read-only", "permissions": ["get_customer"]}'
-
-# Grant a permission
-curl -X POST http://localhost:8080/security/roles/risk_agent/grant \
-  -d '{"tool": "get_customer"}'
-
-# Revoke it
-curl -X POST http://localhost:8080/security/roles/risk_agent/revoke \
-  -d '{"tool": "get_customer"}'
-
-# View audit trail
-curl http://localhost:8080/security/audit
+pytest                          # 100+ tests; scripted model, no key or network needed
+python evals/run_evals.py --trials 3 --min-pass 0.8     # real model + MCP server
 ```
 
-Every permission check — allowed or denied — is logged with timestamp, agent, tool, and session ID.
-
-## Testing and evaluation
-
-```bash
-# Unit tests (72 cases, ~1s)
-PYTHONPATH=. pytest tests/ -v
-
-# Validation checks (31 cases, ~10s)
-PYTHONPATH=. python evals/run_evals.py
-
-# AI quality metrics — robustness, precision/recall, resilience (~10s)
-PYTHONPATH=. python evals/eval_quality.py
-
-# Live AI evals — real LLM calls, measures ReAct success rate (~20min)
-PYTHONPATH=. python evals/eval_live.py
-```
-
-Live eval results with phi3: 83% overall. ReAct reasoning succeeds 33% of the time — the rest falls back to sequential execution. A stronger model would improve this, and the eval framework measures that directly.
-
-## Project structure
-
-```
-server/           MCP server, tools, database, LLM engine
-client/           FastAPI app, agents, orchestrator, RBAC
-rag/              RAG pipeline (ChromaDB + TF-IDF)
-frontend/         Chat UI with live agent trace
-tests/            72 unit + integration tests
-evals/            Validation, quality metrics, live AI evals
-```
+* **Unit/integration tests** pin down harness behaviour with a scripted model: what the model is shown,
+  RBAC blocking and audit, customer scoping, tool errors fed back, step budget, truncation, parallel
+  calls, partial failure, SSE contract.
+* **Behavioural evals** run the real model several times per case (agents are stochastic) and report a
+  pass rate. Checks: right specialists, required/forbidden tools, tool budget, policy cited *and*
+  citation exists in retrieved passages, every number in the answer traceable to tool output, and the
+  customer scope was never escaped.
+* CI runs the tests on every push. Live evals run on demand (`workflow_dispatch`) with a secret key.
 
 ## Design decisions
 
-**Why MCP?** — One protocol for everything. Claude Desktop connects to the same server. Agents are decoupled from tool implementations.
+* **Deterministic tools, reasoning agents.** An earlier design had MCP tools that secretly prompted an
+  LLM, so an agent called an LLM through a tool. Now tools compute facts and agents explain them.
+* **No silent fallbacks.** The old "call every tool if the model fails" mode made weak models look
+  fine and hid failures. Now a model failure is an error, and one failing specialist is reported as
+  such in the answer rather than papered over.
+* **The harness owns security.** Prompts are advice; scoping, permissions and audit are code.
+* **RBAC controls visibility *and* execution.** Hiding a tool saves tokens and removes temptation;
+  the call-time check is defence in depth.
 
-**Why ReAct with fallback?** — Best case: the agent intelligently picks tools. Worst case: it calls everything. Data is always correct either way.
+## Known limitations
 
-**Why fresh MCP connection per tool?** — The LLM takes 10-30s between tool calls. A long-lived SSE connection would timeout. One connection per tool call adds ~50ms but never fails.
-
-**Why database RBAC?** — A hardcoded dict is a demo. Database-backed roles with runtime management and audit logging is production thinking.
+* Data is synthetic and the scoring rules are illustrative, not regulatory-grade.
+* Retrieval corpus is small (9 policy documents, chunked by section); no reranking.
+* Agents get one customer per run; cross-customer comparison is intentionally unsupported.
+* Admin endpoints use a static token; a real deployment would use proper authentication.
+* No conversation memory between requests.
+* Eval pass rates depend on the model; none are published here until run on your setup.

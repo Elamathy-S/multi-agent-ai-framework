@@ -1,300 +1,107 @@
 """
-evals/run_evals.py — Eval runner with scored report.
+evals/run_evals.py — Run behavioural evals against a real model + real MCP server.
 
-Usage:
-    PYTHONPATH=. python evals/run_evals.py
+    PYTHONPATH=. python evals/run_evals.py                 # all cases
+    PYTHONPATH=. python evals/run_evals.py --only risk_with_policy --trials 3
+    PYTHONPATH=. python evals/run_evals.py --min-pass 0.8  # non-zero exit below 80%
 
-Runs all eval cases and prints a report like:
-
-    ┌─────────────────────────────────────────────────┐
-    │          EVAL REPORT — 2026-10-19               │
-    ├──────────────────────┬────────┬────────┬────────┤
-    │ Category             │ Passed │ Total  │ Score  │
-    ├──────────────────────┼────────┼────────┼────────┤
-    │ Routing              │   8    │   8    │ 100.0% │
-    │ Tool Selection       │   8    │   8    │ 100.0% │
-    │ RAG Retrieval        │   5    │   6    │  83.3% │
-    │ Permissions          │   5    │   5    │ 100.0% │
-    │ End-to-End           │   4    │   4    │ 100.0% │
-    ├──────────────────────┼────────┼────────┼────────┤
-    │ OVERALL              │  30    │  31    │  96.8% │
-    └──────────────────────┴────────┴────────┴────────┘
+Needs the MCP server on :8001 and an LLM (ANTHROPIC_API_KEY, or LLM_PROVIDER=ollama).
+Each case is run `--trials` times because agent behaviour is stochastic; the
+report shows a pass rate per case, not a single lucky run. Results are written
+to evals/report.json (git-ignored).
 """
 
+from __future__ import annotations
+
+import argparse
+import asyncio
 import json
 import sys
-from datetime import datetime
+import time
+from pathlib import Path
 
-from evals.eval_dataset import (
-    ROUTING_EVALS,
-    TOOL_SELECTION_EVALS,
-    RAG_EVALS,
-    PERMISSION_EVALS,
-    END_TO_END_EVALS,
-)
-
-
-# ---------------------------------------------------------------------------
-# Eval runners — each returns (passed: bool, detail: str) per case
-# ---------------------------------------------------------------------------
-
-def eval_routing(case: dict) -> tuple[bool, str]:
-    from client.agents.orchestrator import plan_agents
-    selected = plan_agents(case["query"])
-
-    for agent in case["expected_agents"]:
-        if agent not in selected:
-            return False, f"Missing agent '{agent}', got {selected}"
-
-    for agent in case.get("not_expected_agents", []):
-        if agent in selected:
-            return False, f"Unexpected agent '{agent}' in {selected}"
-
-    return True, f"Selected {selected}"
+from client.agents.orchestrator import orchestrator
+from client.mcp.client import MCPClient
+from client.security.rbac import seed_default_roles
+from evals.cases import CASES, Case
+from evals.graders import Trajectory, grade
+from llm import LLMClient, get_llm
 
 
-def eval_tool_selection(case: dict) -> tuple[bool, str]:
-    agent_tools = _get_agent_tools(case["agent"])
+class _Recording(MCPClient):
+    """MCPClient that records the customer_id every scoped call actually used."""
 
-    for tool in case["expected_tools"]:
-        if tool not in agent_tools:
-            return False, f"Agent '{case['agent']}' missing tool '{tool}'"
+    scoped: list[int]
 
-    for tool in case.get("not_expected_tools", []):
-        if tool in agent_tools:
-            return False, f"Agent '{case['agent']}' should not have '{tool}'"
-
-    return True, f"Tools: {list(agent_tools.keys())}"
+    async def call(self, tool_name, **kwargs):
+        if "customer_id" in kwargs:
+            self.scoped.append(kwargs["customer_id"])
+        return await super().call(tool_name, **kwargs)
 
 
-def eval_rag(case: dict) -> tuple[bool, str]:
+async def run_case(case: Case, llm: LLMClient) -> Trajectory:
+    traj = Trajectory(query=case.query, customer_id=case.customer_id)
+    started = time.time()
+    mcp = _Recording()
+    mcp.scoped = []
     try:
-        from rag.embedder import retrieve, index_count
-    except ImportError:
-        return False, "RAG dependencies not installed"
-
-    if index_count() == 0:
-        return False, "RAG index empty"
-
-    results = retrieve(case["query"], n_results=3, category=case["category"])
-    titles = [r["title"] for r in results]
-    scores = [r["score"] for r in results]
-
-    for expected_title in case["expected_titles"]:
-        if not any(expected_title in t for t in titles):
-            return False, f"Missing '{expected_title}', got {titles}"
-
-    if results and max(scores) < case["min_score"]:
-        return False, f"Best score {max(scores):.3f} < threshold {case['min_score']}"
-
-    best = f"{max(scores):.3f}" if scores else "N/A"
-    return True, f"Top: '{titles[0] if titles else 'none'}' (score={best})"
+        async with mcp:
+            out = await orchestrator(case.query, case.customer_id, llm=llm, mcp=mcp)
+        traj.answer = out["answer"]
+        traj.agents_called = out["agents_called"]
+        traj.denials = out["denials"]
+        traj.input_tokens = out["usage"]["input_tokens"]
+        traj.output_tokens = out["usage"]["output_tokens"]
+        traj.tool_calls = [
+            {"agent": s["agent"], "tool": s["action"], "args": s["args"], "ok": s["ok"], "obs": s["obs"]}
+            for r in out["agent_results"].values() for s in r["steps"]
+        ]
+    except Exception as exc:
+        traj.error = f"{type(exc).__name__}: {exc}"
+    traj.scoped_customer_ids = mcp.scoped
+    traj.latency_s = round(time.time() - started, 1)
+    return traj
 
 
-def eval_permissions(case: dict) -> tuple[bool, str]:
-    from client.security.permissions import check_permission
-    result = check_permission(case["agent"], case["tool"])
+async def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--only", help="run a single case id")
+    ap.add_argument("--trials", type=int, default=1)
+    ap.add_argument("--min-pass", type=float, default=0.0, help="exit 1 if overall pass rate is below this")
+    args = ap.parse_args()
 
-    if result == case["should_allow"]:
-        action = "allowed" if result else "blocked"
-        return True, f"{case['agent']} → {case['tool']}: {action}"
-    else:
-        expected = "allow" if case["should_allow"] else "block"
-        return False, f"Expected {expected}, got {'allowed' if result else 'blocked'}"
+    seed_default_roles()
+    llm = get_llm()
+    cases = [c for c in CASES if not args.only or c.id == args.only]
+    print(f"Model: {llm.model}   cases: {len(cases)}   trials: {args.trials}\n")
 
+    report, passed_total, total = [], 0, 0
+    for case in cases:
+        trials = []
+        for _ in range(args.trials):
+            traj = await run_case(case, llm)
+            checks = grade(case, traj)
+            ok = all(c.passed for c in checks)
+            trials.append({"passed": ok, "checks": [c.__dict__ for c in checks],
+                           "answer": traj.answer, "agents": traj.agents_called,
+                           "tools": [c["tool"] for c in traj.tool_calls],
+                           "tokens": traj.input_tokens + traj.output_tokens, "latency_s": traj.latency_s})
+            passed_total += ok
+            total += 1
+        rate = sum(t["passed"] for t in trials) / len(trials)
+        print(f"{'PASS' if rate == 1 else 'FAIL' if rate == 0 else 'FLAKY':5} {case.id:18} {rate:.0%}")
+        for t in trials:
+            for c in t["checks"]:
+                if not c["passed"]:
+                    print(f"        ✗ {c['name']}: {c['detail']}")
+        report.append({"case": case.id, "why": case.why, "pass_rate": rate, "trials": trials})
 
-def eval_end_to_end(case: dict) -> tuple[bool, str]:
-    from client.agents.orchestrator import synthesise
-
-    # Build mock agent results based on what the case needs
-    mock_results = _build_mock_results(case)
-    result = synthesise(case["query"], mock_results)
-    result_lower = result.lower()
-
-    for keyword in case.get("answer_must_contain", []):
-        if keyword.lower() not in result_lower:
-            return False, f"Missing '{keyword}' in answer"
-
-    for keyword in case.get("answer_must_not_contain", []):
-        if keyword.lower() in result_lower:
-            return False, f"Unexpected '{keyword}' in answer"
-
-    return True, f"Answer contains all expected keywords"
-
-
-# ---------------------------------------------------------------------------
-# Main runner
-# ---------------------------------------------------------------------------
-
-def run_all_evals() -> dict:
-    categories = [
-        ("Routing",        ROUTING_EVALS,        eval_routing),
-        ("Tool Selection", TOOL_SELECTION_EVALS,  eval_tool_selection),
-        ("RAG Retrieval",  RAG_EVALS,             eval_rag),
-        ("Permissions",    PERMISSION_EVALS,      eval_permissions),
-        ("End-to-End",     END_TO_END_EVALS,      eval_end_to_end),
-    ]
-
-    report = {}
-    total_passed = 0
-    total_cases = 0
-
-    print()
-    print("=" * 60)
-    print(f"  EVAL REPORT — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    print("=" * 60)
-
-    for cat_name, cases, runner in categories:
-        passed = 0
-        failures = []
-
-        print(f"\n  {cat_name}")
-        print(f"  {'─' * 50}")
-
-        for case in cases:
-            try:
-                ok, detail = runner(case)
-            except Exception as e:
-                ok, detail = False, f"Exception: {e}"
-
-            status = "✅" if ok else "❌"
-            print(f"    {status} {case['id']}: {case.get('description', '')}")
-            if not ok:
-                print(f"       → {detail}")
-                failures.append({"id": case["id"], "detail": detail})
-            if ok:
-                passed += 1
-
-        total = len(cases)
-        pct = (passed / total * 100) if total else 0
-        total_passed += passed
-        total_cases += total
-
-        report[cat_name] = {
-            "passed": passed,
-            "total": total,
-            "score": round(pct, 1),
-            "failures": failures,
-        }
-
-    # Summary table
-    overall_pct = (total_passed / total_cases * 100) if total_cases else 0
-
-    print()
-    print("┌──────────────────────┬────────┬────────┬─────────┐")
-    print("│ Category             │ Passed │ Total  │ Score   │")
-    print("├──────────────────────┼────────┼────────┼─────────┤")
-
-    for cat_name, data in report.items():
-        name = cat_name.ljust(20)
-        p = str(data["passed"]).center(6)
-        t = str(data["total"]).center(6)
-        s = f"{data['score']}%".rjust(7)
-        print(f"│ {name} │ {p} │ {t} │ {s} │")
-
-    print("├──────────────────────┼────────┼────────┼─────────┤")
-    p = str(total_passed).center(6)
-    t = str(total_cases).center(6)
-    s = f"{overall_pct:.1f}%".rjust(7)
-    print(f"│ {'OVERALL'.ljust(20)} │ {p} │ {t} │ {s} │")
-    print("└──────────────────────┴────────┴────────┴─────────┘")
-    print()
-
-    # Save report to file
-    report_data = {
-        "timestamp": datetime.now().isoformat(),
-        "overall_score": round(overall_pct, 1),
-        "total_passed": total_passed,
-        "total_cases": total_cases,
-        "categories": report,
-    }
-
-    with open("evals/eval_report.json", "w") as f:
-        json.dump(report_data, f, indent=2)
-    print(f"  Report saved to evals/eval_report.json")
-    print()
-
-    return report_data
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _get_agent_tools(agent_name: str) -> dict:
-    if agent_name == "customer":
-        from client.agents.customer_agent import TOOLS
-    elif agent_name == "loan":
-        from client.agents.loan_agent import TOOLS
-    elif agent_name == "risk":
-        from client.agents.risk_agent import TOOLS
-    elif agent_name == "trading":
-        from client.agents.trading_agent import TOOLS
-    else:
-        raise ValueError(f"Unknown agent: {agent_name}")
-    return TOOLS
-
-
-def _build_mock_results(case: dict) -> dict:
-    """Build mock agent results for end-to-end synthesis eval."""
-    mock = {}
-
-    if any(k in case.get("answer_must_contain", []) for k in ["name", "email", "customer"]):
-        mock["customer"] = {
-            "observations": {
-                "get_customer": {
-                    "id": case.get("customer_id", 1),
-                    "name": "Alice Test",
-                    "email": "alice@test.com",
-                    "created_at": "2024-01-15",
-                }
-            }
-        }
-
-    if any(k in case.get("answer_must_contain", []) for k in ["credit", "loan", "score"]):
-        mock["loan"] = {
-            "observations": {
-                "get_credit_score": {
-                    "credit_score": 720,
-                    "rating": "Good",
-                    "loan_approval_likelihood": "High",
-                },
-                "get_loan_status": [
-                    {"amount": 10000, "status": "active", "interest_rate": 5.5}
-                ],
-            }
-        }
-
-    if any(k in case.get("answer_must_contain", []) for k in ["risk", "fraud"]):
-        mock["risk"] = {
-            "observations": {
-                "get_risk_score": {
-                    "risk_score": 42,
-                    "level": "MEDIUM",
-                    "key_risk_factors": ["transaction pattern"],
-                    "recommendation": "Monitor closely",
-                },
-                "check_fraud": {
-                    "fraud_flag": False,
-                    "confidence": "HIGH",
-                    "reason": "No suspicious patterns.",
-                },
-            }
-        }
-
-    if any(k in case.get("answer_must_contain", []) for k in ["portfolio", "trading", "pnl"]):
-        mock["trading"] = {
-            "observations": {
-                "get_trading_portfolio": [
-                    {"symbol": "AAPL", "quantity": 10, "avg_price": 150.0}
-                ],
-                "get_pnl": {"total_pnl": 500.0},
-            }
-        }
-
-    return mock
+    overall = passed_total / total if total else 0.0
+    print(f"\nOverall: {passed_total}/{total} = {overall:.0%}")
+    Path(__file__).with_name("report.json").write_text(json.dumps(
+        {"model": llm.model, "overall_pass_rate": overall, "cases": report}, indent=2, default=str))
+    return 0 if overall >= args.min_pass else 1
 
 
 if __name__ == "__main__":
-    result = run_all_evals()
-    sys.exit(0 if result["overall_score"] == 100.0 else 1)
+    sys.exit(asyncio.run(main()))

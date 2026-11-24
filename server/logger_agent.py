@@ -60,6 +60,7 @@ def log_agent_session(
     final_answer:       str,
     total_latency_ms:   float,
     error:              str = None,
+    plan_reason:        str = "",
 ):
     """
     Write a full agent session to the agent_logs table.
@@ -120,7 +121,7 @@ def log_agent_session(
             user_query         = user_query,
             customer_id        = customer_id,
             agents_planned     = json.dumps(agents_planned),
-            plan_reason        = f"keyword routing → {agents_planned}",
+            plan_reason        = plan_reason,
             agent_steps        = json.dumps(agent_steps_summary, default=str),
             tools_called       = json.dumps(tools_called),
             rag_policies       = json.dumps(rag_retrieved, default=str),

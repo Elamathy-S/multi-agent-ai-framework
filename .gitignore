@@ -22,9 +22,13 @@ Thumbs.db
 # Environment
 .env
 
-# Generated eval reports (keep eval_live_report.json for demo)
-evals/eval_report.json
-evals/eval_quality_report.json
+# Generated reports and local state
+evals/report.json
+logs/
 
-# Cleanup scripts (one-time use)
-cleanup*.sh
+# Build artifacts and local databases (regenerate; never commit)
+*.db
+rag/chroma_db/
+rag/tfidf_index.pkl
+.pytest_cache/
+.ruff_cache/
