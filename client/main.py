@@ -5,9 +5,8 @@ Port 8080. The MCP server (server/mcp_server.py) runs separately on 8001.
 
   GET  /agent/react/stream  → full multi-agent run, live trace over SSE
   POST /agent/run           → same run, one JSON response
-  POST /agent/{name}        → call a single specialist directly
-  /mcp/*                    → inspect the MCP server (tools, prompts, resources)
-  /rag/*, /security/*, /logs/*  → policy search, RBAC admin, audit/session logs
+  GET  /tools               → tools exposed by the MCP server
+  /rag/*, /security/*, /logs/*  → policy search, read-only RBAC + audit, session logs
 """
 
 import asyncio
@@ -18,7 +17,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 from datetime import datetime
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -32,8 +31,7 @@ Base.metadata.create_all(bind=engine)
 
 # RBAC — seed default roles on startup
 from client.security.rbac import (
-    seed_default_roles, get_all_roles, get_role, create_role,
-    add_permission, revoke_permission, toggle_role,
+    seed_default_roles, get_all_roles, get_role,
     get_audit_log, get_audit_stats,
 )
 seed_default_roles()
@@ -41,16 +39,10 @@ seed_default_roles()
 # MCP client — the execution path for all tool calls
 from client.mcp.client import MCPClient, MCPConnectionError
 
-from client.security.admin import require_admin
-from client.tool_router import discover_tools
 
 # Agents
-from client.agents.loop import run_agent
 from client.agents.orchestrator import orchestrator, AGENTS
 from llm import LLMError, get_llm
-
-# Gateway router for /mcp/* introspection endpoints
-from client.mcp.gateway import router as mcp_router
 
 # Direct tool import — only for health check (lightweight, no MCP round-trip)
 from server.tools.customer_tools import get_customer_profile
@@ -248,20 +240,6 @@ async def agent_run(req: ChatRequest):
             "message": req.message, **_payload(result)}
 
 
-@app.post("/agent/{name}", tags=["Agents"])
-async def agent_direct(name: str, req: QueryRequest):
-    """Call one specialist directly (customer, loan, risk or trading)."""
-    if name not in AGENTS:
-        raise HTTPException(status_code=404, detail=f"Unknown agent. Choose from: {', '.join(AGENTS)}")
-    try:
-        llm = get_llm()
-        async with MCPClient() as mcp:
-            res = await run_agent(AGENTS[name], llm, mcp, req.query, req.customer_id)
-    except (LLMError, MCPConnectionError) as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
-    return {"agent": name, "data": res.to_dict()}
-
-
 # ===========================================================================
 # RAG ENDPOINTS (inspection; agents reach RAG through the search_policies MCP tool)
 # ===========================================================================
@@ -304,33 +282,6 @@ def rag_status():
             "index_file":   str(INDEX_FILE),
             "index_exists": INDEX_FILE.exists(),
             "message":      "Index ready" if count > 0 else "Run: PYTHONPATH=. python3 rag/build_index.py",
-        }
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-
-@app.get("/rag/test", tags=["RAG"])
-def rag_test():
-    """Test RAG retrieval with sample queries."""
-    try:
-        from rag.embedder import retrieve, index_count
-        if index_count() == 0:
-            return {"status": "empty", "message": "Run rag/build_index.py first"}
-
-        tests = [
-            ("credit score loan approval", "loan"),
-            ("fraud suspicious transactions", "fraud"),
-            ("risk score high risk customer", "risk"),
-            ("portfolio concentration limit", "trading"),
-        ]
-        results = {}
-        for query, category in tests:
-            docs = retrieve(query, n_results=2, category=category)
-            results[category] = [{"title": d["title"], "score": d["score"]} for d in docs]
-        return {
-            "status":  "working",
-            "results": results,
-            "message": "RAG is retrieving policies correctly" if any(results.values()) else "No results found",
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -418,75 +369,6 @@ def get_role_endpoint(role_name: str):
     return role
 
 
-@app.post("/security/roles", tags=["RBAC"], dependencies=[Depends(require_admin)])
-def create_role_endpoint(payload: dict):
-    """
-    Create a new role.
-    Body: {"name": "audit_agent", "description": "Read-only auditor", "permissions": ["get_customer"]}
-    """
-    name = payload.get("name", "")
-    if not name:
-        return {"error": "Missing 'name' field"}
-    result = create_role(
-        name=name,
-        description=payload.get("description", ""),
-        permissions=payload.get("permissions", []),
-    )
-    return result
-
-
-@app.post("/security/roles/{role_name}/grant", tags=["RBAC"], dependencies=[Depends(require_admin)])
-def grant_permission_endpoint(role_name: str, payload: dict):
-    """
-    Grant a tool permission to a role.
-    Body: {"tool": "get_customer"}
-    """
-    tool = payload.get("tool", "")
-    if not tool:
-        return {"error": "Missing 'tool' field"}
-    return add_permission(role_name, tool)
-
-
-@app.post("/security/roles/{role_name}/revoke", tags=["RBAC"], dependencies=[Depends(require_admin)])
-def revoke_permission_endpoint(role_name: str, payload: dict):
-    """
-    Revoke a tool permission from a role.
-    Body: {"tool": "get_customer"}
-    """
-    tool = payload.get("tool", "")
-    if not tool:
-        return {"error": "Missing 'tool' field"}
-    return revoke_permission(role_name, tool)
-
-
-@app.post("/security/roles/{role_name}/toggle", tags=["RBAC"], dependencies=[Depends(require_admin)])
-def toggle_role_endpoint(role_name: str, payload: dict):
-    """
-    Enable or disable a role.
-    Body: {"active": false}
-    """
-    active = payload.get("active", True)
-    return toggle_role(role_name, active)
-
-
-@app.post("/security/check", tags=["RBAC"], dependencies=[Depends(require_admin)])
-def check_permission_endpoint(payload: dict):
-    """
-    Test whether an agent is allowed to call a tool (queries the DB).
-    Body: {"agent": "risk_agent", "tool": "get_customer"}
-    """
-    from client.security.permissions import check_permission
-    agent = payload.get("agent", "")
-    tool  = payload.get("tool", "")
-    allowed = check_permission(agent, tool)
-    return {
-        "agent":   agent,
-        "tool":    tool,
-        "allowed": allowed,
-        "source":  "database",
-    }
-
-
 @app.get("/security/audit", tags=["RBAC"])
 def audit_log_endpoint(limit: int = 50, denied_only: bool = False):
     """View the access audit log — every permission check recorded."""
@@ -503,25 +385,19 @@ def audit_stats_endpoint():
 
 
 # ===========================================================================
-# DEBUG
+# MCP TOOL LIST
 # ===========================================================================
 
-@app.get("/debug/tools", tags=["Debug"])
-async def debug_tools():
-    """List tools from the MCP server (the single source of truth)."""
-    tools = await discover_tools()
+@app.get("/tools", tags=["MCP"])
+async def list_tools():
+    """List the tools the MCP server exposes (the single source of truth)."""
+    try:
+        async with MCPClient() as mcp:
+            tools = await mcp.list_tools()
+    except MCPConnectionError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
     return {
-        "source":      "MCP server",
-        "mcp_url":     MCP_SERVER_SSE_URL,
+        "mcp_url": MCP_SERVER_SSE_URL,
         "total_tools": len(tools),
-        "tools": [
-            {"name": t["name"], "description": t["description"]}
-            for t in tools
-        ],
+        "tools": [{"name": t["name"], "description": t["description"]} for t in tools],
     }
-
-
-# ---------------------------------------------------------------------------
-# MCP gateway — mounts /mcp/tools, /mcp/prompts, /mcp/resources, etc.
-# ---------------------------------------------------------------------------
-app.include_router(mcp_router)
